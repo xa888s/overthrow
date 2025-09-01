@@ -1,3 +1,6 @@
+// TODO: once this is stabilized, we can remove this crate
+#![allow(unstable_name_collisions)]
+use itermore::IterArrayChunks;
 use rand::seq::SliceRandom;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

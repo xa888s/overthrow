@@ -42,12 +42,14 @@ pub(crate) enum Deposit {
 
 const STARTING_COINS: u8 = 50;
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) struct WithdrawalError {
     coins: PlayerCoins,
     amount_remaining: u8,
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) struct DepositError {
     coins: PlayerCoins,

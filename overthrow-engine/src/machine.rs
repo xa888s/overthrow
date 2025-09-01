@@ -143,6 +143,7 @@ pub(crate) mod game {
         pub(crate) challenger: PlayerId,
         pub(crate) kind: ChallengeableAct,
     }
+    #[allow(dead_code)]
     #[state] pub struct Block {
         pub(crate) possible_challenges: PossibleChallenges,
         pub(crate) actor: PlayerId,

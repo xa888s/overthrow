@@ -1,5 +1,4 @@
-#![feature(iter_array_chunks)]
-#![feature(substr_range)]
+#![warn(unused_crate_dependencies)]
 pub mod action;
 mod coins;
 mod current_player;
