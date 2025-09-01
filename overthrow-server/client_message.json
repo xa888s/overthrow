@@ -1,0 +1,693 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ClientMessage",
+  "oneOf": [
+    {
+      "type": "string",
+      "enum": [
+        "GameCancelled"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "PlayerId": {
+          "$ref": "#/$defs/PlayerId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "PlayerId"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "Info": {
+          "$ref": "#/$defs/Info"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "Info"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "End": {
+          "$ref": "#/$defs/Summary"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "End"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "Outcome": {
+          "$ref": "#/$defs/Outcome"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "Outcome"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "ChooseAction": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Action"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "ChooseAction"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "ChooseChallenge": {
+          "$ref": "#/$defs/Challenge"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "ChooseChallenge"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "ChooseBlock": {
+          "$ref": "#/$defs/Blocks"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "ChooseBlock"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "ChooseReaction": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Reaction"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "ChooseReaction"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "ChooseVictim": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Card"
+          },
+          "maxItems": 2,
+          "minItems": 2
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "ChooseVictim"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "ChooseOneFromThree": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Card"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "ChooseOneFromThree"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "ChooseTwoFromFour": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Card"
+          },
+          "maxItems": 4,
+          "minItems": 4
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "ChooseTwoFromFour"
+      ]
+    }
+  ],
+  "$defs": {
+    "Act": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "Income",
+            "ForeignAid",
+            "Tax",
+            "Exchange"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Steal": {
+              "type": "object",
+              "properties": {
+                "victim": {
+                  "$ref": "#/$defs/PlayerId"
+                }
+              },
+              "required": [
+                "victim"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Steal"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Assassinate": {
+              "type": "object",
+              "properties": {
+                "victim": {
+                  "$ref": "#/$defs/PlayerId"
+                }
+              },
+              "required": [
+                "victim"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Assassinate"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Coup": {
+              "type": "object",
+              "properties": {
+                "victim": {
+                  "$ref": "#/$defs/PlayerId"
+                }
+              },
+              "required": [
+                "victim"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Coup"
+          ]
+        }
+      ]
+    },
+    "Action": {
+      "type": "object",
+      "properties": {
+        "actor": {
+          "$ref": "#/$defs/PlayerId"
+        },
+        "kind": {
+          "$ref": "#/$defs/Act"
+        }
+      },
+      "required": [
+        "actor",
+        "kind"
+      ]
+    },
+    "Block": {
+      "type": "object",
+      "properties": {
+        "actor": {
+          "$ref": "#/$defs/PlayerId"
+        },
+        "blocker": {
+          "$ref": "#/$defs/PlayerId"
+        },
+        "kind": {
+          "$ref": "#/$defs/BlockableAct"
+        }
+      },
+      "required": [
+        "actor",
+        "blocker",
+        "kind"
+      ]
+    },
+    "BlockStealClaim": {
+      "type": "string",
+      "enum": [
+        "Ambassador",
+        "Captain"
+      ]
+    },
+    "BlockableAct": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "ForeignAid"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Steal": {
+              "type": "object",
+              "properties": {
+                "claim": {
+                  "$ref": "#/$defs/BlockStealClaim"
+                },
+                "victim": {
+                  "$ref": "#/$defs/PlayerId"
+                }
+              },
+              "required": [
+                "victim",
+                "claim"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Steal"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Assassinate": {
+              "type": "object",
+              "properties": {
+                "victim": {
+                  "$ref": "#/$defs/PlayerId"
+                }
+              },
+              "required": [
+                "victim"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Assassinate"
+          ]
+        }
+      ]
+    },
+    "Blocks": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "Other": {
+              "$ref": "#/$defs/Block"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Other"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Steal": {
+              "type": "array",
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "$ref": "#/$defs/Block"
+                },
+                {
+                  "$ref": "#/$defs/Block"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Steal"
+          ]
+        }
+      ]
+    },
+    "Card": {
+      "type": "string",
+      "enum": [
+        "Ambassador",
+        "Contessa",
+        "Assassin",
+        "Duke",
+        "Captain"
+      ]
+    },
+    "Challenge": {
+      "type": "object",
+      "properties": {
+        "actor": {
+          "$ref": "#/$defs/PlayerId"
+        },
+        "challenger": {
+          "$ref": "#/$defs/PlayerId"
+        },
+        "kind": {
+          "$ref": "#/$defs/ChallengeableAct"
+        }
+      },
+      "required": [
+        "actor",
+        "challenger",
+        "kind"
+      ]
+    },
+    "ChallengeableAct": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "Exchange",
+            "Tax",
+            "BlockAssassination",
+            "BlockForeignAid"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Steal": {
+              "type": "object",
+              "properties": {
+                "victim": {
+                  "$ref": "#/$defs/PlayerId"
+                }
+              },
+              "required": [
+                "victim"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Steal"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Assassinate": {
+              "type": "object",
+              "properties": {
+                "victim": {
+                  "$ref": "#/$defs/PlayerId"
+                }
+              },
+              "required": [
+                "victim"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Assassinate"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "BlockSteal": {
+              "type": "object",
+              "properties": {
+                "claim": {
+                  "$ref": "#/$defs/BlockStealClaim"
+                }
+              },
+              "required": [
+                "claim"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "BlockSteal"
+          ]
+        }
+      ]
+    },
+    "Info": {
+      "type": "object",
+      "properties": {
+        "coins_remaining": {
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "current_player": {
+          "$ref": "#/$defs/PlayerId"
+        },
+        "player_views": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/PlayerView"
+          }
+        }
+      },
+      "required": [
+        "player_views",
+        "current_player",
+        "coins_remaining"
+      ]
+    },
+    "Outcome": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "GainCoins": {
+              "type": "object",
+              "properties": {
+                "actor": {
+                  "$ref": "#/$defs/PlayerId"
+                },
+                "amount": {
+                  "type": "integer",
+                  "format": "uint8",
+                  "maximum": 255,
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "actor",
+                "amount"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "GainCoins"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "LoseCoins": {
+              "type": "object",
+              "properties": {
+                "actor": {
+                  "$ref": "#/$defs/PlayerId"
+                },
+                "amount": {
+                  "type": "integer",
+                  "format": "uint8",
+                  "maximum": 255,
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "actor",
+                "amount"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "LoseCoins"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "LosesInfluence": {
+              "type": "object",
+              "properties": {
+                "victim": {
+                  "$ref": "#/$defs/PlayerId"
+                }
+              },
+              "required": [
+                "victim"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "LosesInfluence"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ExchangesCards": {
+              "type": "object",
+              "properties": {
+                "actor": {
+                  "$ref": "#/$defs/PlayerId"
+                }
+              },
+              "required": [
+                "actor"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "ExchangesCards"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "LoseTurn": {
+              "type": "object",
+              "properties": {
+                "victim": {
+                  "$ref": "#/$defs/PlayerId"
+                }
+              },
+              "required": [
+                "victim"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "LoseTurn"
+          ]
+        }
+      ]
+    },
+    "PlayerId": {
+      "type": "string",
+      "enum": [
+        "One",
+        "Two",
+        "Three",
+        "Four",
+        "Five",
+        "Six"
+      ]
+    },
+    "PlayerView": {
+      "type": "object",
+      "properties": {
+        "coins": {
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "name": {
+          "type": "string"
+        },
+        "revealed_cards": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Card"
+          }
+        }
+      },
+      "required": [
+        "name",
+        "coins",
+        "revealed_cards"
+      ]
+    },
+    "Reaction": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "Challenge": {
+              "$ref": "#/$defs/Challenge"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Challenge"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Block": {
+              "$ref": "#/$defs/Block"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Block"
+          ]
+        }
+      ]
+    },
+    "Summary": {
+      "type": "object",
+      "properties": {
+        "winner": {
+          "$ref": "#/$defs/PlayerId"
+        }
+      },
+      "required": [
+        "winner"
+      ]
+    }
+  }
+}

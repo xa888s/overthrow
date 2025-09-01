@@ -1,0 +1,16 @@
+[package]
+name = "overthrow-server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+axum = { version = "0.8.4", features = ["ws"] }
+futures = { version = "0.3.31", default-features = false }
+itertools = "0.14.0"
+overthrow-engine = { version = "0.1.0", path = "../overthrow-engine" }
+schemars = "1.0.4"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.143"
+tokio = { version = "1.47.1", features = ["full"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }

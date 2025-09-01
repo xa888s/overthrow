@@ -1,0 +1,406 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ClientResponse",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "Block": {
+          "$ref": "#/$defs/Card"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "Block"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "Challenge": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "Challenge"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "Action": {
+          "$ref": "#/$defs/Action"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "Action"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "Reaction": {
+          "$ref": "#/$defs/Reaction"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "Reaction"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "Victim": {
+          "$ref": "#/$defs/Card"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "Victim"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "ExchangeOne": {
+          "$ref": "#/$defs/Card"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "ExchangeOne"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "ExchangeTwo": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Card"
+          },
+          "maxItems": 2,
+          "minItems": 2
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "ExchangeTwo"
+      ]
+    }
+  ],
+  "$defs": {
+    "Act": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "Income",
+            "ForeignAid",
+            "Tax",
+            "Exchange"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Steal": {
+              "type": "object",
+              "properties": {
+                "victim": {
+                  "$ref": "#/$defs/PlayerId"
+                }
+              },
+              "required": [
+                "victim"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Steal"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Assassinate": {
+              "type": "object",
+              "properties": {
+                "victim": {
+                  "$ref": "#/$defs/PlayerId"
+                }
+              },
+              "required": [
+                "victim"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Assassinate"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Coup": {
+              "type": "object",
+              "properties": {
+                "victim": {
+                  "$ref": "#/$defs/PlayerId"
+                }
+              },
+              "required": [
+                "victim"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Coup"
+          ]
+        }
+      ]
+    },
+    "Action": {
+      "type": "object",
+      "properties": {
+        "actor": {
+          "$ref": "#/$defs/PlayerId"
+        },
+        "kind": {
+          "$ref": "#/$defs/Act"
+        }
+      },
+      "required": [
+        "actor",
+        "kind"
+      ]
+    },
+    "Block": {
+      "type": "object",
+      "properties": {
+        "actor": {
+          "$ref": "#/$defs/PlayerId"
+        },
+        "blocker": {
+          "$ref": "#/$defs/PlayerId"
+        },
+        "kind": {
+          "$ref": "#/$defs/BlockableAct"
+        }
+      },
+      "required": [
+        "actor",
+        "blocker",
+        "kind"
+      ]
+    },
+    "BlockStealClaim": {
+      "type": "string",
+      "enum": [
+        "Ambassador",
+        "Captain"
+      ]
+    },
+    "BlockableAct": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "ForeignAid"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Steal": {
+              "type": "object",
+              "properties": {
+                "claim": {
+                  "$ref": "#/$defs/BlockStealClaim"
+                },
+                "victim": {
+                  "$ref": "#/$defs/PlayerId"
+                }
+              },
+              "required": [
+                "victim",
+                "claim"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Steal"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Assassinate": {
+              "type": "object",
+              "properties": {
+                "victim": {
+                  "$ref": "#/$defs/PlayerId"
+                }
+              },
+              "required": [
+                "victim"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Assassinate"
+          ]
+        }
+      ]
+    },
+    "Card": {
+      "type": "string",
+      "enum": [
+        "Ambassador",
+        "Contessa",
+        "Assassin",
+        "Duke",
+        "Captain"
+      ]
+    },
+    "Challenge": {
+      "type": "object",
+      "properties": {
+        "actor": {
+          "$ref": "#/$defs/PlayerId"
+        },
+        "challenger": {
+          "$ref": "#/$defs/PlayerId"
+        },
+        "kind": {
+          "$ref": "#/$defs/ChallengeableAct"
+        }
+      },
+      "required": [
+        "actor",
+        "challenger",
+        "kind"
+      ]
+    },
+    "ChallengeableAct": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "Exchange",
+            "Tax",
+            "BlockAssassination",
+            "BlockForeignAid"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Steal": {
+              "type": "object",
+              "properties": {
+                "victim": {
+                  "$ref": "#/$defs/PlayerId"
+                }
+              },
+              "required": [
+                "victim"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Steal"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Assassinate": {
+              "type": "object",
+              "properties": {
+                "victim": {
+                  "$ref": "#/$defs/PlayerId"
+                }
+              },
+              "required": [
+                "victim"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Assassinate"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "BlockSteal": {
+              "type": "object",
+              "properties": {
+                "claim": {
+                  "$ref": "#/$defs/BlockStealClaim"
+                }
+              },
+              "required": [
+                "claim"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "BlockSteal"
+          ]
+        }
+      ]
+    },
+    "PlayerId": {
+      "type": "string",
+      "enum": [
+        "One",
+        "Two",
+        "Three",
+        "Four",
+        "Five",
+        "Six"
+      ]
+    },
+    "Reaction": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "Challenge": {
+              "$ref": "#/$defs/Challenge"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Challenge"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Block": {
+              "$ref": "#/$defs/Block"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Block"
+          ]
+        }
+      ]
+    }
+  }
+}
