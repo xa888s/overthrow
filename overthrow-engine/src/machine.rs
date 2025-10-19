@@ -48,32 +48,38 @@ pub(crate) struct CoupData {
 // Typestate that describes the entire Coup state loop
 // You can view the following as a decision tree that shows possible paths the state machine can take between states:
 //
-// Wait -> Basic       -> Challenge -> Wait/End
-//                     -> Block -> Challenge -> Wait/End
-//                              -> Wait
+// Wait -> Basic             -> Challenge -> Wait/End
+//                           -> Block -> Challenge -> Wait/End
+//                                    -> Wait
 //
-//      -> Assassinate -> Challenge -> Wait/End
-//                     -> Block -> Challenge -> Wait/End
-//                              -> ChooseVictimCard -> Wait/End
-//                              -> Wait/End
-//                     -> ChooseVictimCard -> Wait/End
-//                     -> Wait/End
+//      -> Reactable         -> Challenge -> Wait/End
+//                           -> Block -> Challenge -> Wait/End
+//                                    -> ChooseVictimCard -> Wait/End
+//                                    -> Wait/End
+//                           -> ChooseVictimCard -> Wait/End
+//                           -> Wait/End
 //
-//      -> Coup        -> Wait/End
+//      -> OnlyChallengeable -> Challenge -> Wait/End
+//                           -> Wait/End
 //
-//      -> ExchangeOne -> Challenge -> Wait/End
-//                     -> Block -> Challenge -> Wait/End
-//                              -> ChooseOneFromThree -> Wait
-//                              -> Wait
-//                     -> ChooseOneFromThree -> Wait
-//                     -> Wait
+//      -> OnlyBlockable     -> Block -> Wait
+//                           -> Wait
 //
-//      -> ExchangeTwo -> Challenge -> Wait/End
-//                     -> Block -> Challenge -> Wait/End
-//                              -> ChooseTwoFromFour -> Wait
-//                              -> Wait
-//                     -> ChooseTwoFromFour -> Wait
-//                     -> Wait
+//      -> Safe              -> Wait/End
+//
+//      -> ExchangeOne       -> Challenge -> Wait/End
+//                           -> Block -> Challenge -> Wait/End
+//                                    -> ChooseOneFromThree -> Wait
+//                                    -> Wait
+//                           -> ChooseOneFromThree -> Wait
+//                           -> Wait
+//
+//      -> ExchangeTwo       -> Challenge -> Wait/End
+//                           -> Block -> Challenge -> Wait/End
+//                                    -> ChooseTwoFromFour -> Wait
+//                                    -> Wait
+//                           -> ChooseTwoFromFour -> Wait
+//                           -> Wait
 //
 // End (goes nowhere)
 //

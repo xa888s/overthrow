@@ -15,6 +15,7 @@ use overthrow_engine::{
     action::{Action, Block, Blocks, Challenge, Reaction},
     deck::Card,
     machine::{Outcome, Summary},
+    match_to_indices,
     players::PlayerId,
 };
 use schemars::JsonSchema;
@@ -34,6 +35,7 @@ fn deserialize<T: for<'a> Deserialize<'a>>(response: Utf8Bytes) -> Result<T, Cli
     serde_json::from_str::<T>(response.as_str()).map_err(|_| ClientError::InvalidResponse)
 }
 
+// TODO: remove redundant information from messages to simplify schema
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub enum ClientMessage {
     PlayerId(PlayerId),
@@ -41,22 +43,23 @@ pub enum ClientMessage {
     End(Summary),
     GameCancelled,
     Outcome(Outcome),
-    ChooseAction(Vec<Action>),
-    ChooseChallenge(Challenge),
-    ChooseBlock(Blocks),
-    ChooseReaction(Vec<Reaction>),
-    ChooseVictim([Card; 2]),
-    ChooseOneFromThree([Card; 3]),
-    ChooseTwoFromFour([Card; 4]),
+    ActionChoices(Vec<Action>),
+    ChallengeChoice(Challenge),
+    BlockChoices(Blocks),
+    ReactionChoices(Vec<Reaction>),
+    VictimChoices([Card; 2]),
+    OneFromThreeChoices([Card; 3]),
+    TwoFromFourChoices([Card; 4]),
 }
 
+// TODO: remove redundant information from responses to simplify schema
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub enum ClientResponse {
     Block(Card),
     Challenge(bool),
-    Action(Action),
-    Reaction(Reaction),
-    Victim(Card),
+    Act(Action),
+    React(Reaction),
+    ChooseVictim(Card),
     ExchangeOne(Card),
     ExchangeTwo([Card; 2]),
 }
@@ -216,16 +219,19 @@ async fn handle_game_message(message: GameMessage, context: Context<'_>) -> Resu
 }
 
 async fn handle_choose_two(choices: [Card; 4], context: Context<'_>) -> Result<(), Error> {
-    let message = Message::Text(serialize(ClientMessage::ChooseTwoFromFour(choices)));
+    let message = Message::Text(serialize(ClientMessage::TwoFromFourChoices(choices)));
     context.client_sender.send(message).await?;
+
+    // matching found == chosen cards are valid
+    let are_valid_choices = |cards| match_to_indices(cards, choices).is_some();
 
     // wait for client's choice
     loop {
         if let Some(Ok(Message::Text(message))) = context.client_receiver.next().await
             && let Ok(response) = deserialize(message)
             && let ClientResponse::ExchangeTwo(cards) = response
+            && are_valid_choices(cards)
         {
-            // TODO: verify cards are valid
             context.senders.choose_two.send(cards).await.unwrap();
             break Ok(());
         } else {
@@ -241,7 +247,7 @@ async fn send_invalid_response(sender: &mut SplitSink<WebSocket, Message>) -> Re
 
 // TODO: factor out some functions/macros to avoid so much repetition
 async fn handle_choose_one(choices: [Card; 3], context: Context<'_>) -> Result<(), Error> {
-    let message = Message::Text(serialize(ClientMessage::ChooseOneFromThree(choices)));
+    let message = Message::Text(serialize(ClientMessage::OneFromThreeChoices(choices)));
     context.client_sender.send(message).await?;
 
     // wait for client's choice
@@ -249,8 +255,8 @@ async fn handle_choose_one(choices: [Card; 3], context: Context<'_>) -> Result<(
         if let Some(Ok(Message::Text(message))) = context.client_receiver.next().await
             && let Ok(response) = deserialize(message)
             && let ClientResponse::ExchangeOne(card) = response
+            && choices.contains(&card)
         {
-            // TODO: verify card is valid
             context.senders.choose_one.send(card).await.unwrap();
             break Ok(());
         } else {
@@ -260,16 +266,16 @@ async fn handle_choose_one(choices: [Card; 3], context: Context<'_>) -> Result<(
 }
 
 async fn handle_choosing_victim(choices: [Card; 2], context: Context<'_>) -> Result<(), Error> {
-    let message = Message::Text(serialize(ClientMessage::ChooseVictim(choices)));
+    let message = Message::Text(serialize(ClientMessage::VictimChoices(choices)));
     context.client_sender.send(message).await?;
 
     // wait for client's choice
     loop {
         if let Some(Ok(Message::Text(message))) = context.client_receiver.next().await
             && let Ok(response) = deserialize(message)
-            && let ClientResponse::Victim(card) = response
+            && let ClientResponse::ChooseVictim(card) = response
+            && choices.contains(&card)
         {
-            // TODO: verify card is valid
             context.senders.victim_card.send(card).await.unwrap();
             break Ok(());
         } else {
@@ -282,15 +288,15 @@ async fn handle_choosing_victim(choices: [Card; 2], context: Context<'_>) -> Res
 async fn handle_action_choices(choices: Choices, context: Context<'_>) -> Result<(), Error> {
     match choices {
         Choices::Actions(actions) => {
-            let message = Message::Text(serialize(ClientMessage::ChooseAction(actions)));
+            let message = Message::Text(serialize(ClientMessage::ActionChoices(actions.clone())));
             context.client_sender.send(message).await?;
 
             loop {
                 if let Some(Ok(Message::Text(message))) = context.client_receiver.next().await
                     && let Ok(response) = deserialize(message)
-                    && let ClientResponse::Action(action) = response
+                    && let ClientResponse::Act(action) = response
+                    && actions.contains(&action)
                 {
-                    // TODO: verify action is valid
                     context.senders.action.send(action).await.unwrap();
                     break Ok(());
                 } else {
@@ -300,7 +306,7 @@ async fn handle_action_choices(choices: Choices, context: Context<'_>) -> Result
         }
         Choices::Challenge(challenge) => {
             let message =
-                Message::Text(serialize(ClientMessage::ChooseChallenge(challenge.clone())));
+                Message::Text(serialize(ClientMessage::ChallengeChoice(challenge.clone())));
             context.client_sender.send(message).await?;
 
             loop {
@@ -323,7 +329,7 @@ async fn handle_action_choices(choices: Choices, context: Context<'_>) -> Result
             }
         }
         Choices::Block(blocks) => {
-            let message = Message::Text(serialize(ClientMessage::ChooseBlock(blocks.clone())));
+            let message = Message::Text(serialize(ClientMessage::BlockChoices(blocks.clone())));
             context.client_sender.send(message).await?;
 
             loop {
@@ -345,10 +351,11 @@ async fn handle_action_choices(choices: Choices, context: Context<'_>) -> Result
         }
         Choices::Reactions(reactions) => {
             let message =
-                Message::Text(serialize(ClientMessage::ChooseReaction(reactions.clone())));
+                Message::Text(serialize(ClientMessage::ReactionChoices(reactions.clone())));
             context.client_sender.send(message).await?;
 
             loop {
+                // FIXME: use global timeout, instead of duplicating local one
                 let response =
                     timeout(Duration::from_secs(10), context.client_receiver.next()).await;
 
@@ -357,9 +364,9 @@ async fn handle_action_choices(choices: Choices, context: Context<'_>) -> Result
                     break Ok(());
                 } else if let Ok(Some(Ok(Message::Text(message)))) = response
                     && let Ok(response) = deserialize::<ClientResponse>(message)
-                    && let ClientResponse::Reaction(reaction) = response
+                    && let ClientResponse::React(reaction) = response
+                    && reactions.contains(&reaction)
                 {
-                    // TODO: verify reaction is valid
                     match reaction {
                         Reaction::Block(block) => context.senders.block.send(block).await.unwrap(),
                         Reaction::Challenge(challenge) => {

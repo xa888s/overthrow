@@ -26,7 +26,7 @@ const STARTING_DECK: [Card; 15] = [
 ];
 
 #[subenum(BlockStealClaim)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum Card {
     #[subenum(BlockStealClaim)]
     Ambassador,

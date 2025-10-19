@@ -378,25 +378,15 @@ impl ChooseTwoFromFourState for CoupGame<ChooseTwoFromFour> {
         self.state.choices
     }
 
-    fn advance(mut self, [c1, c2]: [Card; 2]) -> CoupGame<Wait> {
+    fn advance(mut self, cards @ [c1, c2]: [Card; 2]) -> CoupGame<Wait> {
         let choices = self.state.choices;
 
         // find indices of chosen cards in our choices array (if they exist)
         // this is for later when we want to return the correct cards to our
         // deck
-        let indices =
-            choices
-                .into_iter()
-                .enumerate()
-                .fold([None, None], |[i1, i2], (index, card)| {
-                    let c1_index = (c1 == card && i1.is_none()).then_some(index);
-                    let c2_index = (c2 == card).then_some(index);
-                    let c1_xor_c2 = c1_index.xor(c2_index);
+        let indices = match_to_indices(cards, choices);
 
-                    [i1.or(c1_index), i2.or(c1_xor_c2.and(c2_index))]
-                });
-
-        let [Some(i1), Some(i2)] = indices else {
+        let Some([i1, i2]) = indices else {
             panic!("Choices were not valid: {:?}", [c1, c2]);
         };
 
@@ -500,5 +490,92 @@ impl EndState for CoupGame<End> {
         Summary {
             winner: last_player,
         }
+    }
+}
+
+// return indices that cards match to within choices if there is a possible matching, otherwise
+// returns None. Checking if this returns None is also a way to verify that choices are valid
+pub fn match_to_indices<const N: usize, const K: usize>(
+    cards: [Card; K],
+    choices: [Card; N],
+) -> Option<[usize; K]> {
+    const { assert!(K <= N) };
+    let starting = cards.map(|card| (card, None));
+    let possible_indices =
+        choices
+            .into_iter()
+            .enumerate()
+            .fold(starting, |indices, (index, choice)| {
+                let mut matched = false;
+                indices.map(|(card, place)| {
+                    if !matched && place.is_none() && card == choice {
+                        matched = true;
+                        (card, Some(index))
+                    } else {
+                        (card, place)
+                    }
+                })
+            });
+
+    // map back to usize, only works if all indices have been set
+    possible_indices.try_map(|(_, i)| i)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn matching_basic() {
+        let cards = [Card::Ambassador, Card::Assassin];
+        let choices = [Card::Ambassador, Card::Assassin, Card::Contessa, Card::Duke];
+
+        let indices = match_to_indices(cards, choices);
+        assert_eq!(indices, Some([0, 1]));
+    }
+
+    #[test]
+    fn matching_dupes() {
+        let cards = [Card::Ambassador, Card::Assassin, Card::Assassin];
+        let choices = [Card::Ambassador, Card::Assassin, Card::Contessa, Card::Duke];
+
+        let indices = match_to_indices(cards, choices);
+        assert_eq!(indices, None);
+    }
+
+    #[test]
+    fn matching_other() {
+        let cards = [Card::Ambassador, Card::Captain];
+        let choices = [Card::Ambassador, Card::Assassin, Card::Contessa, Card::Duke];
+
+        let indices = match_to_indices(cards, choices);
+        assert_eq!(indices, None);
+    }
+
+    #[test]
+    fn matching_one_to_one() {
+        let cards = [Card::Ambassador, Card::Assassin, Card::Contessa, Card::Duke];
+        let choices = [Card::Ambassador, Card::Assassin, Card::Contessa, Card::Duke];
+
+        let indices = match_to_indices(cards, choices);
+        assert_eq!(indices, Some([0, 1, 2, 3]));
+    }
+
+    #[test]
+    fn matching_trivial_1() {
+        let cards = [];
+        let choices = [Card::Ambassador, Card::Assassin, Card::Contessa, Card::Duke];
+
+        let indices = match_to_indices(cards, choices);
+        assert_eq!(indices, Some([]));
+    }
+
+    #[test]
+    fn matching_trivial_2() {
+        let cards = [];
+        let choices = [];
+
+        let indices = match_to_indices(cards, choices);
+        assert_eq!(indices, Some([]));
     }
 }

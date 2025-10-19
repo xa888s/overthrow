@@ -59,7 +59,7 @@
     {
       "type": "object",
       "properties": {
-        "ChooseAction": {
+        "ActionChoices": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/Action"
@@ -68,37 +68,37 @@
       },
       "additionalProperties": false,
       "required": [
-        "ChooseAction"
+        "ActionChoices"
       ]
     },
     {
       "type": "object",
       "properties": {
-        "ChooseChallenge": {
+        "ChallengeChoice": {
           "$ref": "#/$defs/Challenge"
         }
       },
       "additionalProperties": false,
       "required": [
-        "ChooseChallenge"
+        "ChallengeChoice"
       ]
     },
     {
       "type": "object",
       "properties": {
-        "ChooseBlock": {
+        "BlockChoices": {
           "$ref": "#/$defs/Blocks"
         }
       },
       "additionalProperties": false,
       "required": [
-        "ChooseBlock"
+        "BlockChoices"
       ]
     },
     {
       "type": "object",
       "properties": {
-        "ChooseReaction": {
+        "ReactionChoices": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/Reaction"
@@ -107,13 +107,13 @@
       },
       "additionalProperties": false,
       "required": [
-        "ChooseReaction"
+        "ReactionChoices"
       ]
     },
     {
       "type": "object",
       "properties": {
-        "ChooseVictim": {
+        "VictimChoices": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/Card"
@@ -124,13 +124,13 @@
       },
       "additionalProperties": false,
       "required": [
-        "ChooseVictim"
+        "VictimChoices"
       ]
     },
     {
       "type": "object",
       "properties": {
-        "ChooseOneFromThree": {
+        "OneFromThreeChoices": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/Card"
@@ -141,13 +141,13 @@
       },
       "additionalProperties": false,
       "required": [
-        "ChooseOneFromThree"
+        "OneFromThreeChoices"
       ]
     },
     {
       "type": "object",
       "properties": {
-        "ChooseTwoFromFour": {
+        "TwoFromFourChoices": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/Card"
@@ -158,7 +158,7 @@
       },
       "additionalProperties": false,
       "required": [
-        "ChooseTwoFromFour"
+        "TwoFromFourChoices"
       ]
     }
   ],

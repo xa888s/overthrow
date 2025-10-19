@@ -29,37 +29,37 @@
     {
       "type": "object",
       "properties": {
-        "Action": {
+        "Act": {
           "$ref": "#/$defs/Action"
         }
       },
       "additionalProperties": false,
       "required": [
-        "Action"
+        "Act"
       ]
     },
     {
       "type": "object",
       "properties": {
-        "Reaction": {
+        "React": {
           "$ref": "#/$defs/Reaction"
         }
       },
       "additionalProperties": false,
       "required": [
-        "Reaction"
+        "React"
       ]
     },
     {
       "type": "object",
       "properties": {
-        "Victim": {
+        "ChooseVictim": {
           "$ref": "#/$defs/Card"
         }
       },
       "additionalProperties": false,
       "required": [
-        "Victim"
+        "ChooseVictim"
       ]
     },
     {

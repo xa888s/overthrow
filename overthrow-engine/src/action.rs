@@ -8,7 +8,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use subenum::subenum;
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum Reaction {
     Challenge(Challenge),
     Block(Block),
@@ -137,7 +137,7 @@ impl From<OnlyChallengeableAct> for ChallengeableAct {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Block {
     pub(crate) actor: PlayerId,
     pub(crate) blocker: PlayerId,
@@ -195,7 +195,7 @@ impl PossibleActions {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Challenge {
     pub(crate) actor: PlayerId,
     pub(crate) challenger: PlayerId,
