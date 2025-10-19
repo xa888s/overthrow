@@ -1,7 +1,7 @@
 use crate::{
     Disconnected,
     dispatcher::Senders,
-    game::{BroadcastMessage, Choices, GameMessage, Info, PlayerChannel},
+    game::{BroadcastMessage, Choices, GameMessage, PlayerChannel},
 };
 
 use super::AppState;
@@ -12,13 +12,14 @@ use futures::{
     stream::{SplitSink, SplitStream},
 };
 use overthrow_engine::{
-    action::{Action, Block, Blocks, Challenge, Reaction},
+    action::{Block, Blocks, Reaction},
     deck::Card,
-    machine::{Outcome, Summary},
+    machine::Summary,
     match_to_indices,
-    players::PlayerId,
 };
-use schemars::JsonSchema;
+
+use overthrow_types::*;
+
 use serde::{Deserialize, Serialize};
 use std::ops::ControlFlow;
 use std::{net::SocketAddr, time::Duration};
@@ -33,41 +34,6 @@ fn serialize<T: Serialize>(value: T) -> Utf8Bytes {
 
 fn deserialize<T: for<'a> Deserialize<'a>>(response: Utf8Bytes) -> Result<T, ClientError> {
     serde_json::from_str::<T>(response.as_str()).map_err(|_| ClientError::InvalidResponse)
-}
-
-// TODO: remove redundant information from messages to simplify schema
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub enum ClientMessage {
-    PlayerId(PlayerId),
-    Info(Info),
-    End(Summary),
-    GameCancelled,
-    Outcome(Outcome),
-    ActionChoices(Vec<Action>),
-    ChallengeChoice(Challenge),
-    BlockChoices(Blocks),
-    ReactionChoices(Vec<Reaction>),
-    VictimChoices([Card; 2]),
-    OneFromThreeChoices([Card; 3]),
-    TwoFromFourChoices([Card; 4]),
-}
-
-// TODO: remove redundant information from responses to simplify schema
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub enum ClientResponse {
-    Block(Card),
-    Challenge(bool),
-    Act(Action),
-    React(Reaction),
-    ChooseVictim(Card),
-    ExchangeOne(Card),
-    ExchangeTwo([Card; 2]),
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub enum ClientError {
-    NotReady,
-    InvalidResponse,
 }
 
 #[derive(Debug)]

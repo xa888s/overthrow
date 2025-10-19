@@ -12,12 +12,11 @@ use axum::{
 use client::client_handler;
 use dispatcher::dispatcher;
 use game::PlayerChannel;
+use overthrow_types::{ClientError, ClientMessage, ClientResponse};
 use schemars::schema_for;
 use std::{fs, net::SocketAddr};
 use tokio::sync::mpsc::{self, Sender};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-
-pub use crate::client::{ClientError, ClientMessage, ClientResponse};
 
 #[derive(Clone, Debug)]
 pub struct Disconnected {

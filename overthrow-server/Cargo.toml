@@ -7,7 +7,8 @@ edition = "2024"
 axum = { version = "0.8.4", features = ["ws"] }
 futures = { version = "0.3.31", default-features = false }
 itertools = "0.14.0"
-overthrow-engine = { version = "0.1.0", path = "../overthrow-engine" }
+overthrow-engine = { path = "../overthrow-engine" }
+overthrow-types = { path = "../overthrow-types" }
 schemars = "1.0.4"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.143"
