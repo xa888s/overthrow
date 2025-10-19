@@ -1,0 +1,9 @@
+[package]
+name = "overthrow-types"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+overthrow-engine = { path = "../overthrow-engine" }
+serde = { version = "1.0.219", features = ["derive"] }
+schemars = "1.0.4"

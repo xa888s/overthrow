@@ -1,6 +1,5 @@
 use crate::dispatcher::PlayerHalf;
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use overthrow_types::{Info, PlayerView};
 use tokio::select;
 use tokio::time::sleep;
 
@@ -24,20 +23,6 @@ use tokio::time::timeout;
 use tracing::instrument;
 
 pub type PlayerChannel = (PlayerId, broadcast::Receiver<BroadcastMessage>, PlayerHalf);
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct PlayerView {
-    pub name: String,
-    pub coins: u8,
-    pub revealed_cards: Vec<Card>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct Info {
-    player_views: HashMap<PlayerId, PlayerView>,
-    current_player: PlayerId,
-    coins_remaining: u8,
-}
 
 #[derive(Debug)]
 pub enum Choices {
