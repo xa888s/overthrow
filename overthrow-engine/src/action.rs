@@ -101,6 +101,13 @@ impl Blocks {
         let (Blocks::Other(block) | Blocks::Steal(block, _)) = self;
         block.blocker
     }
+
+    pub fn claims(&self, card: Card) -> bool {
+        match self {
+            Blocks::Other(b1) => b1.claim() == card,
+            Blocks::Steal(b1, b2) => b1.claim() == card || b2.claim() == card,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

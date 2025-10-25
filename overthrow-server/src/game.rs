@@ -1,7 +1,7 @@
 use crate::dispatcher::PlayerHalf;
 use overthrow_types::{Info, PlayerView};
 use tokio::select;
-use tokio::time::sleep;
+use tokio::time::{Instant, timeout, timeout_at};
 
 use super::dispatcher::GameHalf;
 use futures::future::select_all;
@@ -18,11 +18,18 @@ use overthrow_engine::players::{PlayerId, Players};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::broadcast;
-use tokio::time::timeout;
+use tokio::sync::{
+    broadcast::{self, error::SendError as BroadcastError},
+    mpsc::error::SendError as MpscError,
+};
 use tracing::instrument;
 
-pub type PlayerChannel = (PlayerId, broadcast::Receiver<BroadcastMessage>, PlayerHalf);
+#[derive(Debug)]
+pub struct PlayerGameInfo {
+    pub id: PlayerId,
+    pub broadcast_receiver: broadcast::Receiver<BroadcastMessage>,
+    pub channels: PlayerHalf,
+}
 
 #[derive(Debug)]
 pub enum Choices {
@@ -47,7 +54,24 @@ pub enum BroadcastMessage {
     Outcome(Outcome),
     End(Summary),
     GameCancelled,
+    ReactionTimeout,
 }
+
+#[derive(Debug, Clone)]
+pub struct PlayerCommunicationError;
+impl<T> From<MpscError<T>> for PlayerCommunicationError {
+    fn from(_: MpscError<T>) -> Self {
+        PlayerCommunicationError
+    }
+}
+
+impl<T> From<BroadcastError<T>> for PlayerCommunicationError {
+    fn from(_: BroadcastError<T>) -> Self {
+        PlayerCommunicationError
+    }
+}
+
+type Result<T> = std::result::Result<T, PlayerCommunicationError>;
 
 impl From<Choices> for GameMessage {
     fn from(choices: Choices) -> Self {
@@ -67,32 +91,18 @@ struct ChannelHandles<'a> {
 pub async fn coup_game(
     mut player_channels: HashMap<PlayerId, GameHalf>,
     broadcaster: Arc<broadcast::Sender<BroadcastMessage>>,
-) -> Summary {
+) -> Result<Summary> {
     let mut game_state = CoupGameState::Wait(CoupGame::with_count(player_channels.len()));
 
-    loop {
-        use CoupGameState::*;
+    let summary = loop {
+        use CoupGameState as State;
         let handles = ChannelHandles {
             player_channels: &mut player_channels,
             broadcaster: &broadcaster,
         };
 
-        game_state = match game_state {
-            Wait(coup_game) => handle_wait(coup_game, handles).await,
-            ChooseVictimCard(coup_game) => choose_victim_card(coup_game, handles).await,
-            ChooseOneFromThree(coup_game) => choose_one(coup_game, handles).await,
-            ChooseTwoFromFour(coup_game) => choose_two(coup_game, handles).await,
-            End(coup_game) => {
-                let summary = coup_game.summary();
-                tracing::debug!(winner = ?summary.winner, "Game finished successfully");
-                // end game for all players
-                broadcaster.send(BroadcastMessage::End(summary)).unwrap();
-                break summary;
-            }
-        };
-
-        // round has ended, so we can broadcast the new info to all of the players
-        if let CoupGameState::Wait(game) = &game_state {
+        // round has started, so we can broadcast the game info to all of the players
+        if let State::Wait(game) = &game_state {
             let info = game.info();
             let player_views = get_player_views(info.players);
             let info = Info {
@@ -101,10 +111,41 @@ pub async fn coup_game(
                 coins_remaining: info.coins_remaining,
             };
 
-            tracing::trace!(info = ?info, "Broadcasting info to all players");
-            broadcaster.send(BroadcastMessage::Info(info)).unwrap();
+            tracing::trace!(info = ?info, "Broadcasting game info to all players");
+            if broadcaster.send(BroadcastMessage::Info(info)).is_err() {
+                tracing::error!("Failed to broadcase info to players (probably all disconnected)");
+            }
         }
-    }
+
+        let next_game_state = match game_state {
+            State::Wait(coup_game) => handle_wait(coup_game, handles).await,
+            State::ChooseVictimCard(coup_game) => choose_victim_card(coup_game, handles).await,
+            State::ChooseOneFromThree(coup_game) => choose_one(coup_game, handles).await,
+            State::ChooseTwoFromFour(coup_game) => choose_two(coup_game, handles).await,
+            State::End(coup_game) => {
+                let summary = coup_game.summary();
+                tracing::debug!(winner = ?summary.winner, "Game finished successfully");
+                // end game for all players
+                broadcaster.send(BroadcastMessage::End(summary)).unwrap();
+                if broadcaster.send(BroadcastMessage::End(summary)).is_err() {
+                    tracing::error!(
+                        "Failed to broadcast info to players (probably all disconnected)"
+                    );
+                }
+                break Ok(summary);
+            }
+        };
+
+        match next_game_state {
+            Ok(next_game_state) => game_state = next_game_state,
+            Err(e) => {
+                tracing::error!("Failed to communicate with client (probably disconnected)");
+                break Err(e);
+            }
+        }
+    };
+
+    summary
 }
 
 fn get_player_views(players: &Players) -> HashMap<PlayerId, PlayerView> {
@@ -143,7 +184,7 @@ fn get_player_views(players: &Players) -> HashMap<PlayerId, PlayerView> {
 async fn choose_victim_card(
     game: CoupGame<ChooseVictimCard>,
     handles: ChannelHandles<'_>,
-) -> CoupGameState {
+) -> Result<CoupGameState> {
     let choices = game.choices();
     let victim = game.victim();
     tracing::debug!(victim = ?victim, choices = ?choices, "Choosing victim card");
@@ -153,21 +194,22 @@ async fn choose_victim_card(
         .get_mut(&victim)
         .expect("Must exist");
 
-    sender
-        .send(GameMessage::ChooseVictim(choices))
-        .await
-        .unwrap();
+    sender.send(GameMessage::ChooseVictim(choices)).await?;
 
-    let choice = receivers.victim_card.recv().await.unwrap();
+    let choice = receivers
+        .victim_card
+        .recv()
+        .await
+        .ok_or(PlayerCommunicationError)?;
     tracing::debug!(victim = ?victim, choice = ?choice, possible_choices = ?choices, "Received choice");
-    CoupGameState::Wait(game.advance(choice))
+    Ok(CoupGameState::Wait(game.advance(choice)))
 }
 
 #[instrument(skip_all)]
 async fn choose_one(
     game: CoupGame<ChooseOneFromThree>,
     handles: ChannelHandles<'_>,
-) -> CoupGameState {
+) -> Result<CoupGameState> {
     let choices = game.choices();
     let actor = game.actor();
     tracing::debug!(actor = ?actor, choices = ?choices, "Exchanging one card from three");
@@ -176,70 +218,76 @@ async fn choose_one(
 
     sender
         .send(GameMessage::ChooseOneFromThree(choices))
-        .await
-        .unwrap();
+        .await?;
 
-    let choice = receivers.choose_one.recv().await.unwrap();
+    let choice = receivers
+        .choose_one
+        .recv()
+        .await
+        .ok_or(PlayerCommunicationError)?;
     tracing::debug!(actor = ?actor, choice = ?choice, possible_choices = ?choices, "Received choice");
-    CoupGameState::Wait(game.advance(choice))
+    Ok(CoupGameState::Wait(game.advance(choice)))
 }
 
 #[instrument(skip_all)]
 async fn choose_two(
     game: CoupGame<ChooseTwoFromFour>,
     handles: ChannelHandles<'_>,
-) -> CoupGameState {
+) -> Result<CoupGameState> {
     let choices = game.choices();
     let actor = game.actor();
     tracing::debug!(actor = ?actor, choices = ?choices, "Exchanging two cards from four");
 
     let (sender, receivers) = handles.player_channels.get_mut(&actor).expect("Must exist");
 
-    sender
-        .send(GameMessage::ChooseTwoFromFour(choices))
-        .await
-        .unwrap();
+    sender.send(GameMessage::ChooseTwoFromFour(choices)).await?;
 
-    let chosen = receivers.choose_two.recv().await.unwrap();
+    let chosen = receivers
+        .choose_two
+        .recv()
+        .await
+        .ok_or(PlayerCommunicationError)?;
     tracing::debug!(actor = ?actor, choice = ?chosen, possible_choices = ?choices, "Received choice");
-    CoupGameState::Wait(game.advance(chosen))
+    Ok(CoupGameState::Wait(game.advance(chosen)))
 }
 
-async fn handle_wait(game: CoupGame<Wait>, handles: ChannelHandles<'_>) -> CoupGameState {
+async fn handle_wait(game: CoupGame<Wait>, handles: ChannelHandles<'_>) -> Result<CoupGameState> {
     let actions: Vec<Action> = game.actions().all().cloned().collect();
     let current_player = game.info().current_player;
 
     let (sender, receivers) = handles
         .player_channels
         .get_mut(&current_player)
-        .expect("Always a valid player");
+        .expect("Must exist");
 
     tracing::trace!(actions = ?actions, "Sending choices to client");
-    sender.send(Choices::Actions(actions).into()).await.unwrap();
+    sender.send(Choices::Actions(actions).into()).await?;
 
-    let choice = receivers.action.recv().await.unwrap();
+    let choice = receivers
+        .action
+        .recv()
+        .await
+        .ok_or(PlayerCommunicationError)?;
     tracing::trace!(chosen_action = ?choice, "Received choice");
 
-    use ActionKind::*;
+    use ActionKind as A;
     match game.play(choice) {
-        Safe(coup_game) => handle_safe(coup_game, handles.broadcaster).await,
-        OnlyChallengeable(coup_game) => handle_challengeable(coup_game, handles).await,
-        OnlyBlockable(coup_game) => handle_blockable(coup_game, handles).await,
-        Reactable(coup_game) => handle_reactable(coup_game, handles).await,
+        A::Safe(coup_game) => handle_safe(coup_game, handles.broadcaster).await,
+        A::OnlyChallengeable(coup_game) => handle_challengeable(coup_game, handles).await,
+        A::OnlyBlockable(coup_game) => handle_blockable(coup_game, handles).await,
+        A::Reactable(coup_game) => handle_reactable(coup_game, handles).await,
     }
 }
 
 async fn handle_safe(
     game: CoupGame<Safe>,
     broadcaster: &broadcast::Sender<BroadcastMessage>,
-) -> CoupGameState {
+) -> Result<CoupGameState> {
     // safe actions always succeed, so we broadcast outcome and continue game
     let outcome = game.outcome();
-    broadcaster
-        .send(BroadcastMessage::Outcome(outcome))
-        .unwrap();
+    broadcaster.send(BroadcastMessage::Outcome(outcome))?;
 
-    game.advance()
+    Ok(game.advance())
 }
 
 async fn handle_challengeable(
@@ -248,8 +296,8 @@ async fn handle_challengeable(
         player_channels,
         broadcaster,
     }: ChannelHandles<'_>,
-) -> CoupGameState {
-    send_challenges(game.challenges().all(), player_channels).await;
+) -> Result<CoupGameState> {
+    send_challenges(game.challenges().all(), player_channels).await?;
 
     let challenges = player_channels
         .values_mut()
@@ -260,15 +308,14 @@ async fn handle_challengeable(
         timeout(Duration::from_secs(10), select_all(challenges)).await
     {
         let game = game.challenge(challenge);
-        broadcaster
-            .send(BroadcastMessage::Outcome(game.outcome()))
-            .unwrap();
+        broadcaster.send(BroadcastMessage::Outcome(game.outcome()))?;
 
-        return game.advance();
+        return Ok(game.advance());
     }
 
     // since no one has challenged, the action must continue
-    game.advance()
+    broadcaster.send(BroadcastMessage::ReactionTimeout)?;
+    Ok(game.advance())
 }
 
 async fn handle_reactable(
@@ -277,8 +324,8 @@ async fn handle_reactable(
         player_channels,
         broadcaster,
     }: ChannelHandles<'_>,
-) -> CoupGameState {
-    send_reactions(game.reactions().all(), player_channels).await;
+) -> Result<CoupGameState> {
+    send_reactions(game.reactions().all(), player_channels).await?;
 
     let blocks = game.reactions().block().clone();
     let blocker_id = blocks.blocker_id();
@@ -299,21 +346,25 @@ async fn handle_reactable(
         unreachable!()
     };
 
+    // set 10 second timer
+    let delay = Instant::now() + Duration::from_secs(10);
+
     // race between the victim blocking, anyone challenging, and a 10 second timeout
     select! {
-        Some(block) = blocker => {
+        Ok(Some(block)) = timeout_at(delay, blocker) => {
             let game = game.block(block);
-            broadcaster.send(BroadcastMessage::Outcome(game.outcome())).unwrap();
-            CoupGameState::Wait(game.advance())
+            broadcaster.send(BroadcastMessage::Outcome(game.outcome()))?;
+            Ok(CoupGameState::Wait(game.advance()))
         },
-        (Some(challenge), _, _) = select_all(challenges) => {
+        Ok((Some(challenge), _, _)) = timeout_at(delay, select_all(challenges)) => {
             let game = game.challenge(challenge);
-            broadcaster.send(BroadcastMessage::Outcome(game.outcome())).unwrap();
-            game.advance()
+            broadcaster.send(BroadcastMessage::Outcome(game.outcome()))?;
+            Ok(game.advance())
         },
-        _ = sleep(Duration::from_secs(10)) => {
-            broadcaster.send(BroadcastMessage::Outcome(game.outcome())).unwrap();
-            game.advance()
+        else => {
+            broadcaster.send(BroadcastMessage::ReactionTimeout)?;
+            broadcaster.send(BroadcastMessage::Outcome(game.outcome()))?;
+            Ok(game.advance())
         },
     }
 }
@@ -324,8 +375,8 @@ async fn handle_blockable(
         player_channels,
         broadcaster,
     }: ChannelHandles<'_>,
-) -> CoupGameState {
-    send_blocks(game.blocks().all(), player_channels).await;
+) -> Result<CoupGameState> {
+    send_blocks(game.blocks().all(), player_channels).await?;
 
     let blocks = player_channels
         .values_mut()
@@ -334,52 +385,52 @@ async fn handle_blockable(
     // if someone blocks within the 10 second window
     if let Ok((Some(block), _, _)) = timeout(Duration::from_secs(10), select_all(blocks)).await {
         let game = game.block(block);
-        broadcaster
-            .send(BroadcastMessage::Outcome(game.outcome()))
-            .unwrap();
+        broadcaster.send(BroadcastMessage::Outcome(game.outcome()))?;
 
-        CoupGameState::Wait(game.advance())
+        Ok(CoupGameState::Wait(game.advance()))
     } else {
         // since no one has blocked, the action must continue
-        CoupGameState::Wait(game.advance())
+        broadcaster.send(BroadcastMessage::ReactionTimeout)?;
+        Ok(CoupGameState::Wait(game.advance()))
     }
 }
 
 async fn send_blocks(
     blocks: &HashMap<PlayerId, Block>,
     player_channels: &mut HashMap<PlayerId, GameHalf>,
-) {
+) -> Result<()> {
     for (id, block) in blocks {
         let (sender, _) = player_channels.get_mut(id).expect("Must exist");
         sender
             .send(Choices::Block(Blocks::Other(block.clone())).into())
-            .await
-            .unwrap();
+            .await?;
     }
+
+    Ok(())
 }
 
 async fn send_challenges(
     challenges: &HashMap<PlayerId, Challenge>,
     player_channels: &mut HashMap<PlayerId, GameHalf>,
-) {
+) -> Result<()> {
     for (id, challenge) in challenges {
         let (sender, _) = player_channels.get_mut(id).expect("Must exist");
         sender
             .send(Choices::Challenge(challenge.clone()).into())
-            .await
-            .unwrap();
+            .await?;
     }
+
+    Ok(())
 }
 
 async fn send_reactions(
     reactions: HashMap<PlayerId, Vec<Reaction>>,
     player_channels: &mut HashMap<PlayerId, GameHalf>,
-) {
+) -> Result<()> {
     for (id, reaction) in reactions {
         let (sender, _) = player_channels.get_mut(&id).expect("Must exist");
-        sender
-            .send(Choices::Reactions(reaction).into())
-            .await
-            .unwrap();
+        sender.send(Choices::Reactions(reaction).into()).await?;
     }
+
+    Ok(())
 }

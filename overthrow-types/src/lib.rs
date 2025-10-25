@@ -1,4 +1,4 @@
-use overthrow_engine::{
+pub use overthrow_engine::{
     action::{Action, Blocks, Challenge, Reaction},
     deck::Card,
     machine::{Outcome, Summary},
@@ -7,10 +7,12 @@ use overthrow_engine::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use uuid::Uuid;
 
 // TODO: remove redundant information from messages to simplify schema
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub enum ClientMessage {
+    GameId(Uuid),
     PlayerId(PlayerId),
     Info(Info),
     End(Summary),
