@@ -10,6 +10,7 @@ use ws::tungstenite::Message as WsMessage;
 mod tui;
 use tui::ui;
 mod draw;
+mod selector;
 
 #[derive(Debug)]
 pub enum Message {
@@ -86,6 +87,7 @@ async fn main() {
                 if needs_response {
                     // receive ClientResponse from TUI task
                     let response = loop {
+                        eprintln!("Waiting for response from TUI task");
                         select! {
                             response = client_rx.recv() => break response,
                             Some(Ok(msg)) = receiver.next() => {

@@ -1,5 +1,5 @@
 pub use overthrow_engine::{
-    action::{Action, Blocks, Challenge, Reaction},
+    action::{Action, Block, Blocks, Challenge, Reaction},
     deck::Card,
     machine::{Outcome, Summary},
     players::PlayerId,
@@ -30,8 +30,9 @@ pub enum ClientMessage {
 // TODO: remove redundant information from responses to simplify schema
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub enum ClientResponse {
+    Pass,
     Block(Card),
-    Challenge(bool),
+    Challenge,
     Act(Action),
     React(Reaction),
     ChooseVictim(Card),

@@ -13,6 +13,7 @@ use super::deck::{Card, DeadHand, Hand};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt::Display;
 
 // there can only be 6 players
 #[derive(
@@ -25,6 +26,13 @@ pub enum PlayerId {
     Four = 4,
     Five = 5,
     Six = 6,
+}
+
+use std::fmt;
+impl Display for PlayerId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", *self as u8)
+    }
 }
 
 impl PlayerId {

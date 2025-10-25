@@ -94,7 +94,7 @@ pub async fn coup_game(
 ) -> Result<Summary> {
     let mut game_state = CoupGameState::Wait(CoupGame::with_count(player_channels.len()));
 
-    let summary = loop {
+    loop {
         use CoupGameState as State;
         let handles = ChannelHandles {
             player_channels: &mut player_channels,
@@ -113,7 +113,8 @@ pub async fn coup_game(
 
             tracing::trace!(info = ?info, "Broadcasting game info to all players");
             if broadcaster.send(BroadcastMessage::Info(info)).is_err() {
-                tracing::error!("Failed to broadcase info to players (probably all disconnected)");
+                tracing::error!("Failed to broadcast info to players (probably all disconnected)");
+                break Err(PlayerCommunicationError);
             }
         }
 
@@ -126,7 +127,6 @@ pub async fn coup_game(
                 let summary = coup_game.summary();
                 tracing::debug!(winner = ?summary.winner, "Game finished successfully");
                 // end game for all players
-                broadcaster.send(BroadcastMessage::End(summary)).unwrap();
                 if broadcaster.send(BroadcastMessage::End(summary)).is_err() {
                     tracing::error!(
                         "Failed to broadcast info to players (probably all disconnected)"
@@ -143,9 +143,7 @@ pub async fn coup_game(
                 break Err(e);
             }
         }
-    };
-
-    summary
+    }
 }
 
 fn get_player_views(players: &Players) -> HashMap<PlayerId, PlayerView> {

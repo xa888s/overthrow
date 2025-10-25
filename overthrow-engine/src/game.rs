@@ -168,7 +168,7 @@ impl ReactableState for CoupGame<Reactable> {
 
     fn outcome(&self) -> Outcome {
         match self.state.kind {
-            ReactableAct::Steal { victim } => Outcome::LoseCoins {
+            ReactableAct::Steal { victim, .. } => Outcome::LoseCoins {
                 actor: victim,
                 amount: 2,
             },
@@ -183,7 +183,7 @@ impl ReactableState for CoupGame<Reactable> {
                 self.spend(Deposit::Assassinate, actor);
                 self.lose_influence(victim)
             }
-            ReactableAct::Steal { victim } => {
+            ReactableAct::Steal { victim, .. } => {
                 let victim_coins = self.data.players.get_coins_for(victim);
                 let actor_coins = self.data.players.get_coins_for(self.state.actor);
                 let (victim_coins, actor_coins) = victim_coins.steal(actor_coins);

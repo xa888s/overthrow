@@ -12,7 +12,7 @@ use futures::{
     stream::{SplitSink, SplitStream},
 };
 use overthrow_engine::{
-    action::{Block, Blocks, Reaction},
+    action::{Blocks, Reaction},
     deck::Card,
     machine::Summary,
     match_to_indices,
@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::ops::ControlFlow;
 use tokio::select;
-use tokio::sync::{broadcast, mpsc::Sender, oneshot};
+use tokio::sync::{broadcast, oneshot};
 use tracing::instrument;
 use uuid::Uuid;
 
@@ -44,10 +44,251 @@ enum Ending {
 
 #[derive(Debug)]
 struct ClientHandle<'state> {
-    client_sender: &'state mut SplitSink<WebSocket, Message>,
-    client_receiver: &'state mut SplitStream<WebSocket>,
+    player_sender: &'state mut SplitSink<WebSocket, Message>,
+    player_receiver: &'state mut SplitStream<WebSocket>,
     broadcast_receiver: &'state mut broadcast::Receiver<BroadcastMessage>,
     senders: &'state mut Senders,
+}
+
+impl<'state> ClientHandle<'state> {
+    async fn send_to_client(&mut self, message: ClientMessage) -> Result<(), Error> {
+        let message = Message::Text(serialize(message));
+        self.player_sender.send(message).await
+    }
+
+    async fn send_game_cancelled(&mut self) -> Result<(), Error> {
+        self.send_to_client(ClientMessage::GameCancelled).await
+    }
+
+    async fn send_not_ready(&mut self) -> Result<(), Error> {
+        let not_ready = Message::Text(serialize(ClientError::NotReady));
+        self.player_sender.send(not_ready).await
+    }
+
+    async fn send_invalid_response(&mut self) -> Result<(), Error> {
+        let err = Message::Text(serialize(ClientError::InvalidResponse));
+        self.player_sender.send(err).await
+    }
+
+    #[instrument(skip_all)]
+    async fn handle_broadcast(
+        &mut self,
+        message: BroadcastMessage,
+    ) -> Result<ControlFlow<Ending>, Error> {
+        match message {
+            BroadcastMessage::End(summary) => {
+                self.send_to_client(ClientMessage::End(summary)).await?;
+                Ok(ControlFlow::Break(Ending::Summary(summary)))
+            }
+            BroadcastMessage::Info(info) => {
+                self.send_to_client(ClientMessage::Info(info)).await?;
+                Ok(ControlFlow::Continue(()))
+            }
+            BroadcastMessage::Outcome(outcome) => {
+                self.send_to_client(ClientMessage::Outcome(outcome)).await?;
+                Ok(ControlFlow::Continue(()))
+            }
+            BroadcastMessage::GameCancelled => {
+                self.send_to_client(ClientMessage::GameCancelled).await?;
+                Ok(ControlFlow::Break(Ending::GameCancelled))
+            }
+            BroadcastMessage::ReactionTimeout => {
+                panic!("Should never have a top level reaction timeout")
+            }
+        }
+    }
+
+    async fn handle_game_message(&mut self, message: GameMessage) -> Result<(), Error> {
+        match message {
+            GameMessage::ChooseAction(choices) => self.handle_action_choices(choices).await,
+            GameMessage::ChooseVictim(choices) => self.handle_choosing_victim(choices).await,
+            GameMessage::ChooseOneFromThree(choices) => self.handle_choose_one(choices).await,
+            GameMessage::ChooseTwoFromFour(choices) => self.handle_choose_two(choices).await,
+        }
+    }
+
+    async fn handle_choose_two(&mut self, choices: [Card; 4]) -> Result<(), Error> {
+        self.send_to_client(ClientMessage::TwoFromFourChoices(choices))
+            .await?;
+
+        // matching found == chosen cards are valid
+        let are_valid_choices = |cards| match_to_indices(cards, choices).is_some();
+
+        // wait for client's choice
+        loop {
+            if let Some(Ok(Message::Text(message))) = self.player_receiver.next().await
+                && let Ok(response) = deserialize(message)
+                && let ClientResponse::ExchangeTwo(cards) = response
+                && are_valid_choices(cards)
+            {
+                self.senders.choose_two.send(cards).await.unwrap();
+                break Ok(());
+            } else {
+                self.send_invalid_response().await?;
+            }
+        }
+    }
+
+    async fn handle_choose_one(&mut self, choices: [Card; 3]) -> Result<(), Error> {
+        self.send_to_client(ClientMessage::OneFromThreeChoices(choices))
+            .await?;
+
+        // wait for client's choice
+        loop {
+            if let Some(Ok(Message::Text(message))) = self.player_receiver.next().await
+                && let Ok(response) = deserialize(message)
+                && let ClientResponse::ExchangeOne(card) = response
+                && choices.contains(&card)
+            {
+                self.senders.choose_one.send(card).await.unwrap();
+                break Ok(());
+            } else {
+                self.send_invalid_response().await?;
+            }
+        }
+    }
+
+    async fn handle_choosing_victim(&mut self, choices: [Card; 2]) -> Result<(), Error> {
+        self.send_to_client(ClientMessage::VictimChoices(choices))
+            .await?;
+
+        // wait for client's choice
+        loop {
+            if let Some(Ok(Message::Text(message))) = self.player_receiver.next().await
+                && let Ok(response) = deserialize(message)
+                && let ClientResponse::ChooseVictim(card) = response
+                && choices.contains(&card)
+            {
+                self.senders.victim_card.send(card).await.unwrap();
+                break Ok(());
+            } else {
+                self.send_invalid_response().await?;
+            }
+        }
+    }
+
+    #[instrument(skip(choices))]
+    async fn handle_action_choices(&mut self, choices: Choices) -> Result<(), Error> {
+        match choices {
+            Choices::Actions(actions) => self.handle_actions(actions).await,
+            Choices::Challenge(challenge) => self.handle_challenge(challenge).await,
+            Choices::Block(blocks) => self.handle_blocks(blocks).await,
+            Choices::Reactions(reactions) => self.handle_reactions(reactions).await,
+        }
+    }
+
+    async fn handle_actions(&mut self, actions: Vec<Action>) -> Result<(), Error> {
+        self.send_to_client(ClientMessage::ActionChoices(actions.clone()))
+            .await?;
+
+        loop {
+            if let Some(Ok(Message::Text(message))) = self.player_receiver.next().await
+                && let Ok(response) = deserialize(message)
+                && let ClientResponse::Act(action) = response
+                && actions.contains(&action)
+            {
+                self.senders.action.send(action).await.unwrap();
+                break Ok(());
+            } else {
+                self.send_invalid_response().await?;
+            }
+        }
+    }
+
+    async fn handle_blocks(&mut self, blocks: Blocks) -> Result<(), Error> {
+        self.send_to_client(ClientMessage::BlockChoices(blocks.clone()))
+            .await?;
+
+        loop {
+            select! {
+                Ok(BroadcastMessage::ReactionTimeout) = self.broadcast_receiver.recv() => break Ok(()),
+                Some(Ok(Message::Text(msg))) = self.player_receiver.next() => {
+                    // if parsing fails, send invalid response
+                    let Ok(msg) = deserialize(msg) else { self.send_invalid_response().await?; continue };
+
+                    // if pass do nothing, if block and valid block, send to game task, otherwise invalid response
+                    match msg {
+                        ClientResponse::Pass => break Ok(()),
+                        ClientResponse::Block(block_as) if blocks.claims(block_as) => {
+                            self.handle_block(blocks, block_as).await;
+                            break Ok(());
+                        }
+                        _ => self.send_invalid_response().await?,
+                    }
+                }
+            }
+        }
+    }
+
+    async fn handle_challenge(&mut self, challenge: Challenge) -> Result<(), Error> {
+        self.send_to_client(ClientMessage::ChallengeChoice(challenge.clone()))
+            .await?;
+
+        loop {
+            select! {
+                Ok(BroadcastMessage::ReactionTimeout) = self.broadcast_receiver.recv() => break Ok(()),
+                Some(Ok(Message::Text(msg))) = self.player_receiver.next() => {
+                    // if parsing fails, send invalid response
+                    let Ok(msg) = deserialize::<ClientResponse>(msg) else { self.send_invalid_response().await?; continue };
+
+                    // if pass do nothing, if challenge and valid challenge, send to game task, otherwise invalid response
+                    match msg {
+                        ClientResponse::Pass => break Ok(()),
+                        ClientResponse::Challenge => {
+                            self.senders.challenge.send(challenge).await.unwrap();
+                            break Ok(());
+                        },
+                        _ => self.send_invalid_response().await?,
+                    }
+                }
+            }
+        }
+    }
+
+    async fn handle_reactions(&mut self, reactions: Vec<Reaction>) -> Result<(), Error> {
+        self.send_to_client(ClientMessage::ReactionChoices(reactions.clone()))
+            .await?;
+
+        loop {
+            select! {
+                Ok(BroadcastMessage::ReactionTimeout) = self.broadcast_receiver.recv() => break Ok(()),
+                Some(Ok(Message::Text(msg))) = self.player_receiver.next() => {
+                    // if parsing fails, send invalid response
+                    let Ok(msg) = deserialize::<ClientResponse>(msg) else { self.send_invalid_response().await?; continue };
+
+                    // if pass do nothing, if react and valid reaction, send to game task, otherwise invalid response
+                    match msg {
+                        ClientResponse::Pass => break Ok(()),
+                        ClientResponse::React(react) if reactions.contains(&react) => {
+                            match react {
+                                Reaction::Block(block) => self.senders.block.send(block).await.unwrap(),
+                                Reaction::Challenge(challenge) => {
+                                    self.senders.challenge.send(challenge).await.unwrap()
+                                }
+                            }
+
+                            break Ok(());
+                        }
+                        _ => self.send_invalid_response().await?,
+                    }
+                }
+            }
+        }
+    }
+
+    async fn handle_block(&mut self, blocks: Blocks, block_as: Card) {
+        let block = match blocks {
+            Blocks::Other(block) => block,
+            Blocks::Steal(b1, b2) => {
+                if b1.claim() == block_as {
+                    b1
+                } else {
+                    b2
+                }
+            }
+        };
+        self.senders.block.send(block).await.unwrap();
+    }
 }
 
 #[instrument(skip(stream, state), fields(game_id))]
@@ -78,7 +319,7 @@ pub async fn client_handler(addr: SocketAddr, stream: WebSocket, state: AppState
     .await
     .is_err()
     {
-        tracing::error!(addr = %addr, "Player has disconnected");
+        tracing::error!("Player has disconnected");
         state
             .disconnected
             .send(Disconnected { addr, game_id })
@@ -95,7 +336,7 @@ pub async fn client_handler(addr: SocketAddr, stream: WebSocket, state: AppState
 }
 
 async fn client_handler_inner(
-    (addr, game_id): (SocketAddr, Uuid),
+    (_, game_id): (SocketAddr, Uuid),
     mut dispatch_receiver: oneshot::Receiver<PlayerGameInfo>,
     client_sender: &mut SplitSink<WebSocket, Message>,
     client_receiver: &mut SplitStream<WebSocket>,
@@ -121,9 +362,6 @@ async fn client_handler_inner(
                     tracing::debug!("Client sent data before game started: {text}");
                     let message = Message::Text(serialize(ClientError::NotReady));
                     client_sender.send(message).await?;
-                } else if let Message::Close(_) = message {
-                    tracing::error!(addr = %addr, "Client sent close frame while waiting for game");
-                    return Err(Error::new("Client has left game"))
                 }
             }
             else => {
@@ -138,9 +376,9 @@ async fn client_handler_inner(
         .send(Message::Text(serialize(ClientMessage::PlayerId(id))))
         .await?;
 
-    let context = ClientHandle {
-        client_receiver,
-        client_sender,
+    let mut client = ClientHandle {
+        player_receiver: client_receiver,
+        player_sender: client_sender,
         broadcast_receiver: &mut broadcast_receiver.resubscribe(),
         senders: &mut tx,
     };
@@ -148,41 +386,26 @@ async fn client_handler_inner(
     // check for messages from the game itself, as there is nothing the player can do (yet)
     loop {
         select! {
-            Some(Ok(message)) = client_receiver.next() => {
+            // TODO: find way to encapsulate player_receiver
+            Some(Ok(message)) = client.player_receiver.next() => {
                 if matches!(message, Message::Close(_)) {
                     break Err(Error::new("Client disconnected"));
                 }
                 let Message::Text(message) = message else { todo!() };
                 tracing::debug!(player_id = ?id, "Received premature message from client: {message}");
-                client_sender.send(Message::Text(serialize(ClientError::NotReady))).await?;
+                client.send_not_ready().await?;
             },
             Some(message) = rx.recv() => {
-                let context = ClientHandle {
-                    client_receiver,
-                    client_sender,
-                    broadcast_receiver: &mut broadcast_receiver.resubscribe(),
-                    senders: &mut tx,
-                };
-
                 select! {
-                    // res = handle_game_message(message, context) => res?,
+                    res = client.handle_game_message(message) => res?,
                     Ok(BroadcastMessage::GameCancelled) = broadcast_receiver.recv() => {
-                        client_sender
-                            .send(Message::Text(serialize(ClientMessage::GameCancelled)))
-                            .await?;
+                        client.send_game_cancelled().await?;
                         break Err(Error::new("Game was cancelled"));
                     },
                 }
             },
             Ok(broadcast) = broadcast_receiver.recv() => {
-                let context = ClientHandle {
-                    client_receiver,
-                    client_sender,
-                    broadcast_receiver: &mut broadcast_receiver.resubscribe(),
-                    senders: &mut tx,
-                };
-
-                match handle_broadcast(broadcast, context).await? {
+                match client.handle_broadcast(broadcast).await? {
                     ControlFlow::Break(Ending::Summary(summary)) => {
                         break Ok(());
                     },
@@ -194,225 +417,4 @@ async fn client_handler_inner(
             },
         }
     }
-}
-
-async fn send_to_client(
-    message: ClientMessage,
-    sender: &mut SplitSink<WebSocket, Message>,
-) -> Result<(), Error> {
-    let message = Message::Text(serialize(message));
-    sender.send(message).await
-}
-
-#[instrument(skip_all)]
-async fn handle_broadcast(
-    message: BroadcastMessage,
-    ctx: ClientHandle<'_>,
-) -> Result<ControlFlow<Ending>, Error> {
-    match message {
-        BroadcastMessage::End(summary) => {
-            send_to_client(ClientMessage::End(summary), ctx.client_sender).await?;
-            Ok(ControlFlow::Break(Ending::Summary(summary)))
-        }
-        BroadcastMessage::Info(info) => {
-            send_to_client(ClientMessage::Info(info), ctx.client_sender).await?;
-            Ok(ControlFlow::Continue(()))
-        }
-        BroadcastMessage::Outcome(outcome) => {
-            send_to_client(ClientMessage::Outcome(outcome), ctx.client_sender).await?;
-            Ok(ControlFlow::Continue(()))
-        }
-        BroadcastMessage::GameCancelled => {
-            send_to_client(ClientMessage::GameCancelled, ctx.client_sender).await?;
-            Ok(ControlFlow::Break(Ending::GameCancelled))
-        }
-        BroadcastMessage::ReactionTimeout => {
-            panic!("Should never have a top level reaction timeout")
-        }
-    }
-}
-
-async fn handle_game_message(message: GameMessage, context: ClientHandle<'_>) -> Result<(), Error> {
-    match message {
-        GameMessage::ChooseAction(choices) => handle_action_choices(choices, context).await,
-        GameMessage::ChooseVictim(choices) => handle_choosing_victim(choices, context).await,
-        GameMessage::ChooseOneFromThree(choices) => handle_choose_one(choices, context).await,
-        GameMessage::ChooseTwoFromFour(choices) => handle_choose_two(choices, context).await,
-    }
-}
-
-async fn handle_choose_two(choices: [Card; 4], context: ClientHandle<'_>) -> Result<(), Error> {
-    let message = Message::Text(serialize(ClientMessage::TwoFromFourChoices(choices)));
-    context.client_sender.send(message).await?;
-
-    // matching found == chosen cards are valid
-    let are_valid_choices = |cards| match_to_indices(cards, choices).is_some();
-
-    // wait for client's choice
-    loop {
-        if let Some(Ok(Message::Text(message))) = context.client_receiver.next().await
-            && let Ok(response) = deserialize(message)
-            && let ClientResponse::ExchangeTwo(cards) = response
-            && are_valid_choices(cards)
-        {
-            context.senders.choose_two.send(cards).await.unwrap();
-            break Ok(());
-        } else {
-            send_invalid_response(context.client_sender).await?;
-        }
-    }
-}
-
-async fn send_invalid_response(sender: &mut SplitSink<WebSocket, Message>) -> Result<(), Error> {
-    let err = Message::Text(serialize(ClientError::InvalidResponse));
-    sender.send(err).await
-}
-
-// TODO: factor out some functions/macros to avoid so much repetition
-async fn handle_choose_one(choices: [Card; 3], context: ClientHandle<'_>) -> Result<(), Error> {
-    let message = Message::Text(serialize(ClientMessage::OneFromThreeChoices(choices)));
-    context.client_sender.send(message).await?;
-
-    // wait for client's choice
-    loop {
-        if let Some(Ok(Message::Text(message))) = context.client_receiver.next().await
-            && let Ok(response) = deserialize(message)
-            && let ClientResponse::ExchangeOne(card) = response
-            && choices.contains(&card)
-        {
-            context.senders.choose_one.send(card).await.unwrap();
-            break Ok(());
-        } else {
-            send_invalid_response(context.client_sender).await?;
-        }
-    }
-}
-
-async fn handle_choosing_victim(
-    choices: [Card; 2],
-    context: ClientHandle<'_>,
-) -> Result<(), Error> {
-    let message = Message::Text(serialize(ClientMessage::VictimChoices(choices)));
-    context.client_sender.send(message).await?;
-
-    // wait for client's choice
-    loop {
-        if let Some(Ok(Message::Text(message))) = context.client_receiver.next().await
-            && let Ok(response) = deserialize(message)
-            && let ClientResponse::ChooseVictim(card) = response
-            && choices.contains(&card)
-        {
-            context.senders.victim_card.send(card).await.unwrap();
-            break Ok(());
-        } else {
-            send_invalid_response(context.client_sender).await?;
-        }
-    }
-}
-
-#[instrument(skip(context, choices))]
-async fn handle_action_choices(choices: Choices, context: ClientHandle<'_>) -> Result<(), Error> {
-    match choices {
-        Choices::Actions(actions) => {
-            let message = Message::Text(serialize(ClientMessage::ActionChoices(actions.clone())));
-            context.client_sender.send(message).await?;
-
-            loop {
-                if let Some(Ok(Message::Text(message))) = context.client_receiver.next().await
-                    && let Ok(response) = deserialize(message)
-                    && let ClientResponse::Act(action) = response
-                    && actions.contains(&action)
-                {
-                    context.senders.action.send(action).await.unwrap();
-                    break Ok(());
-                } else {
-                    send_invalid_response(context.client_sender).await?;
-                }
-            }
-        }
-        Choices::Challenge(challenge) => {
-            let message =
-                Message::Text(serialize(ClientMessage::ChallengeChoice(challenge.clone())));
-            context.client_sender.send(message).await?;
-
-            loop {
-                select! {
-                    Ok(BroadcastMessage::ReactionTimeout) = context.broadcast_receiver.recv() => break Ok(()),
-                    Some(Ok(Message::Text(msg))) = context.client_receiver.next() => {
-                        if let Ok(response) = deserialize(msg)
-                            && let ClientResponse::Challenge(should_challenge) = response
-                            && should_challenge
-                        {
-                            context.senders.challenge.send(challenge).await.unwrap();
-                            break Ok(());
-                        } else {
-                            send_invalid_response(context.client_sender).await?;
-                        }
-                    }
-                }
-            }
-        }
-        Choices::Block(blocks) => {
-            let message = Message::Text(serialize(ClientMessage::BlockChoices(blocks.clone())));
-            context.client_sender.send(message).await?;
-
-            loop {
-                select! {
-                    Ok(BroadcastMessage::ReactionTimeout) = context.broadcast_receiver.recv() => break Ok(()),
-                    Some(Ok(Message::Text(msg))) = context.client_receiver.next() => {
-                        if let Ok(response) = deserialize(msg)
-                            && let ClientResponse::Block(block_as) = response
-                            && blocks.claims(block_as)
-                        {
-                            handle_block(blocks, block_as, &context.senders.block).await;
-                            break Ok(());
-                        } else {
-                            send_invalid_response(context.client_sender).await?;
-                        }
-                    }
-                }
-            }
-        }
-        Choices::Reactions(reactions) => {
-            let message =
-                Message::Text(serialize(ClientMessage::ReactionChoices(reactions.clone())));
-            context.client_sender.send(message).await?;
-
-            loop {
-                select! {
-                    Ok(BroadcastMessage::ReactionTimeout) = context.broadcast_receiver.recv() => break Ok(()),
-                    Some(Ok(Message::Text(msg))) = context.client_receiver.next() => {
-                        if let Ok(response) = deserialize(msg)
-                            && let ClientResponse::React(reaction) = response
-                            && reactions.contains(&reaction)
-                        {
-                            match reaction {
-                                Reaction::Block(block) => context.senders.block.send(block).await.unwrap(),
-                                Reaction::Challenge(challenge) => {
-                                    context.senders.challenge.send(challenge).await.unwrap()
-                                }
-                            }
-                            break Ok(());
-                        } else {
-                            send_invalid_response(context.client_sender).await?;
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-async fn handle_block(blocks: Blocks, block_as: Card, sender: &Sender<Block>) {
-    let block = match blocks {
-        Blocks::Other(block) => block,
-        Blocks::Steal(b1, b2) => {
-            if b1.claim() == block_as {
-                b1
-            } else {
-                b2
-            }
-        }
-    };
-    sender.send(block).await.unwrap();
 }

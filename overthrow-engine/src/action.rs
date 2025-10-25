@@ -6,6 +6,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::fmt::Display;
 use subenum::subenum;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -46,6 +47,10 @@ impl Action {
     pub fn kind(&self) -> Act {
         self.kind
     }
+
+    pub fn claim(&self) -> Option<Card> {
+        self.kind.claim()
+    }
 }
 
 #[subenum(OnlyBlockableAct, OnlyChallengeableAct, ReactableAct, SafeAct)]
@@ -65,6 +70,35 @@ pub enum Act {
     Assassinate { victim: PlayerId },
     #[subenum(SafeAct)]
     Coup { victim: PlayerId },
+}
+
+use std::fmt;
+impl Display for Act {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Act::Income => write!(f, "Take Income"),
+            Act::ForeignAid => write!(f, "Take Foreign Aid"),
+            Act::Tax => write!(f, "Take Tax"),
+            Act::Exchange => write!(f, "Exchange Cards"),
+            Act::Steal { victim } => write!(f, "Take Coins From Player {victim}"),
+            Act::Assassinate { victim } => write!(f, "Assasinate Player {victim}"),
+            Act::Coup { victim } => write!(f, "Coup Player {victim}"),
+        }
+    }
+}
+
+impl Act {
+    pub fn claim(&self) -> Option<Card> {
+        match self {
+            Act::Income => None,
+            Act::ForeignAid => None,
+            Act::Tax => Some(Card::Duke),
+            Act::Exchange => Some(Card::Ambassador),
+            Act::Steal { .. } => Some(Card::Captain),
+            Act::Assassinate { .. } => Some(Card::Assassin),
+            Act::Coup { .. } => None,
+        }
+    }
 }
 
 impl From<&ReactableAct> for ChallengeableAct {
@@ -88,6 +122,19 @@ pub enum BlockableAct {
     Assassinate {
         victim: PlayerId,
     },
+}
+
+impl Display for BlockableAct {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BlockableAct::ForeignAid => write!(f, "Take Foreign Aid"),
+            BlockableAct::Steal { victim, claim } => {
+                let claim: Card = claim.into();
+                write!(f, "Steal From {victim} As {claim}")
+            }
+            BlockableAct::Assassinate { victim } => write!(f, "Assasinate {victim}"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -121,6 +168,23 @@ pub enum ChallengeableAct {
     BlockSteal { claim: BlockStealClaim },
 }
 
+impl Display for ChallengeableAct {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ChallengeableAct::Tax => write!(f, "Take Tax"),
+            ChallengeableAct::Exchange => write!(f, "Exchange Cards"),
+            ChallengeableAct::Steal { victim } => write!(f, "Take Coins From Player {victim}"),
+            ChallengeableAct::Assassinate { victim } => write!(f, "Assasinate Player {victim}"),
+            ChallengeableAct::BlockAssassination => write!(f, "Block Assasination"),
+            ChallengeableAct::BlockForeignAid => write!(f, "Block Foreign Aid"),
+            ChallengeableAct::BlockSteal { claim } => {
+                let claim: Card = claim.into();
+                write!(f, "Block Steal as {claim:?}")
+            }
+        }
+    }
+}
+
 impl From<&ChallengeableAct> for Card {
     fn from(value: &ChallengeableAct) -> Self {
         match value {
@@ -152,8 +216,16 @@ pub struct Block {
 }
 
 impl Block {
+    pub fn actor(&self) -> PlayerId {
+        self.actor
+    }
+
     pub fn blocker(&self) -> PlayerId {
         self.blocker
+    }
+
+    pub fn kind(&self) -> &BlockableAct {
+        &self.kind
     }
 
     pub fn claim(&self) -> Card {
@@ -212,6 +284,14 @@ pub struct Challenge {
 impl Challenge {
     pub fn challenger(&self) -> PlayerId {
         self.challenger
+    }
+
+    pub fn kind(&self) -> &ChallengeableAct {
+        &self.kind
+    }
+
+    pub fn actor(&self) -> PlayerId {
+        self.actor
     }
 }
 

@@ -1,5 +1,7 @@
 // TODO: once this is stabilized, we can remove this crate
 #![allow(unstable_name_collisions)]
+use std::fmt::Display;
+
 use itermore::IterArrayChunks;
 use rand::seq::SliceRandom;
 use schemars::JsonSchema;
@@ -35,6 +37,19 @@ pub enum Card {
     Duke,
     #[subenum(BlockStealClaim)]
     Captain,
+}
+
+use std::fmt;
+impl Display for Card {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Card::Ambassador => write!(f, "Ambassador"),
+            Card::Contessa => write!(f, "Contessa"),
+            Card::Assassin => write!(f, "Assassin"),
+            Card::Duke => write!(f, "Duke"),
+            Card::Captain => write!(f, "Captain"),
+        }
+    }
 }
 
 impl From<&BlockStealClaim> for Card {

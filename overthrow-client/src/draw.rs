@@ -1,16 +1,73 @@
 use itertools::Itertools;
+use overthrow_types::{Info, PlayerId};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
     style::Stylize,
     text::Line,
-    widgets::{Block, Paragraph},
+    widgets::{Block, List, ListState, Paragraph},
 };
 use tui_big_text::{BigText, PixelSize};
+use uuid::Uuid;
 
-use crate::tui::State;
+use crate::tui::{State, UiState};
 
-pub fn game_view(state: &State, f: &mut Frame) {
+fn draw_info_view(player_id: PlayerId, info: &Info, area: Rect, f: &mut Frame) {
+    // have each player view take an equal amount of space
+    let player_count = info.player_views.len();
+    let view_constraints = (0..player_count).map(|_| Constraint::Ratio(1, player_count as u32));
+    let layout = Layout::horizontal(view_constraints);
+
+    // sort views besides local player by player id
+    let sorted_views = info
+        .player_views
+        .iter()
+        .filter(|(id, _)| **id != player_id)
+        .sorted_by_key(|(id, _)| **id);
+
+    // local player should always be first (leftmost in UI)
+    let local_player_view = info
+        .player_views
+        .get_key_value(&player_id)
+        .expect("We are a player aren't we?");
+
+    use std::iter::once;
+    let player_views = once(local_player_view).chain(sorted_views);
+    let player_info_areas = layout.split(area);
+
+    // create blocks for each player view
+    for (area, (id, view)) in player_info_areas.iter().zip(player_views) {
+        let num_id = *id as u8;
+        let title = Line::from(format!("Player {num_id}"));
+        let title = if *id == player_id {
+            title.underlined()
+        } else {
+            title
+        };
+        let block = Block::bordered().title_top(title);
+        let view = format!(
+            "Name: {}\nCoins: {}\nCards: {:?}",
+            view.name, view.coins, view.revealed_cards
+        );
+        let paragraph = Paragraph::new(view).block(block);
+        f.render_widget(paragraph, *area);
+    }
+}
+
+fn draw_input_view(game_id: Uuid, ui_state: &mut UiState, area: Rect, f: &mut Frame) {
+    let choices = ui_state.items.as_ref();
+    let kind = choices
+        .map(|c| c.kind())
+        .unwrap_or("Waiting for choices...");
+    let block = Block::bordered().title_top(format!("Input (Game ID: {game_id}) => {kind}"));
+    let items = choices.map(|c| c.choices()).unwrap_or_else(Vec::new);
+
+    let list = List::new(items).block(block);
+
+    f.render_stateful_widget(list, area, &mut ui_state.state);
+}
+
+pub fn game_view(state: &State, ui_state: &mut UiState, f: &mut Frame) {
     if let State::InGame {
         game_id,
         player_id,
@@ -19,41 +76,12 @@ pub fn game_view(state: &State, f: &mut Frame) {
     {
         // split screen into 2/3 for player views, and 1/3 for input box
         let layout = Layout::vertical([Constraint::Ratio(2, 3), Constraint::Ratio(1, 3)]);
-        let area = f.area();
-        let [info_area, input_area] = layout.split(area)[..]
+        let [info_area, input_area] = layout.split(f.area())[..]
             .try_into()
             .expect("Two constraints provided");
 
-        // have each player view take an equal amount of space
-        let player_count = info.player_views.len();
-        let view_constraints = (0..player_count).map(|_| Constraint::Ratio(1, player_count as u32));
-        let layout = Layout::horizontal(view_constraints);
-
-        // sort views by player id
-        let sorted_views = info.player_views.iter().sorted_by_key(|(id, _)| **id);
-
-        let player_info_areas = layout.split(info_area);
-        for (area, (id, view)) in player_info_areas.iter().zip(sorted_views) {
-            let num_id = *id as u8;
-            let title = Line::from(format!("Player {num_id}"));
-            let title = if id == player_id {
-                title.underlined()
-            } else {
-                title
-            };
-            let block = Block::bordered().title_top(title);
-            let view = format!(
-                "Name: {}\nCoins: {}\nCards: {:?}",
-                view.name, view.coins, view.revealed_cards
-            );
-            let paragraph = Paragraph::new(view).block(block);
-            f.render_widget(paragraph, *area);
-        }
-
-        f.render_widget(
-            Block::bordered().title(format!("Input (Game ID: {game_id})")),
-            input_area,
-        );
+        draw_info_view(*player_id, info, info_area, f);
+        draw_input_view(*game_id, ui_state, input_area, f);
     }
 }
 
