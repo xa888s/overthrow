@@ -9,12 +9,10 @@ use overthrow_engine::machine::SafeState;
 use overthrow_engine::machine::Wait;
 use overthrow_engine::machine::WaitState;
 use overthrow_engine::players::PlayerId;
-use overthrow_engine::players::RawPlayers;
 
 #[test]
 fn basic_round() {
-    let players = RawPlayers::with_names(["Dave", "Garry"]).expect("Valid length");
-    let game = CoupGame::with_players(players);
+    let game = CoupGame::with_player_names(["Dave", "Garry"]);
 
     let action = {
         let actions = game.actions();
@@ -56,8 +54,7 @@ fn basic_round() {
 // Player 1 => assassinate Player 2, ending the game
 #[test]
 fn basic_game() {
-    let players = RawPlayers::with_names(["Dave", "Garry"]).expect("Valid length");
-    let game = CoupGame::with_players(players);
+    let game = CoupGame::with_player_names(["Dave", "Garry"]);
     let take_basic_act = |game: &CoupGame<Wait>, act: Act| {
         let actions = game.actions();
 

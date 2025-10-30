@@ -9,65 +9,62 @@ use axum::{
     response::{Html, IntoResponse},
     routing::get,
 };
+use clap::Parser;
 use client::client_handler;
 use dispatcher::dispatcher;
-use game::PlayerChannel;
 use overthrow_types::{ClientError, ClientMessage, ClientResponse};
 use schemars::schema_for;
 use std::{fs, net::SocketAddr};
-use tokio::sync::mpsc::{self, Sender};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tokio::sync::{
+    mpsc::{self, Sender},
+    oneshot,
+};
+use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
+use uuid::Uuid;
+
+use crate::game::PlayerGameInfo;
 
 #[derive(Clone, Debug)]
 pub struct Disconnected {
     addr: SocketAddr,
+    game_id: Uuid,
 }
 
 #[derive(Clone, Debug)]
 struct AppState {
     // for registering a task/connection with the dispatcher
-    register: Sender<Sender<PlayerChannel>>,
+    register: Sender<(oneshot::Sender<PlayerGameInfo>, oneshot::Sender<Uuid>)>,
     disconnected: Sender<Disconnected>,
+}
+
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    #[arg(short, long)]
+    generate: bool,
+
+    #[arg(short, long, default_value_t = 3000)]
+    port: u16,
 }
 
 #[tokio::main]
 async fn main() {
+    let args = Args::parse();
     // used to write out the schemas used for communicating with clients
-    if let Some(arg) = std::env::args().nth(1)
-        && arg == "generate"
-    {
-        let schema = schema_for!(ClientMessage);
-        fs::write(
-            "./client_message.json",
-            serde_json::to_string_pretty(&schema).unwrap(),
-        )
-        .unwrap();
-
-        let schema = schema_for!(ClientResponse);
-
-        fs::write(
-            "./client_response.json",
-            serde_json::to_string_pretty(&schema).unwrap(),
-        )
-        .unwrap();
-
-        let schema = schema_for!(ClientError);
-
-        fs::write(
-            "./client_error.json",
-            serde_json::to_string_pretty(&schema).unwrap(),
-        )
-        .unwrap();
-
+    if args.generate {
+        generate_schemas();
         return;
     }
 
+    // attach logger for terminal and tokio-console
     tracing_subscriber::registry()
+        .with(console_subscriber::spawn())
         .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| format!("{}=trace", env!("CARGO_CRATE_NAME")).into()),
+            tracing_subscriber::fmt::layer().with_filter(
+                EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| format!("{}=trace", env!("CARGO_CRATE_NAME")).into()),
+            ),
         )
-        .with(tracing_subscriber::fmt::layer())
         .init();
 
     // create channel for connections to register with dispatcher
@@ -86,8 +83,8 @@ async fn main() {
         .route("/", get(index))
         .route("/websocket", get(websocket_handler));
 
-    let port = 3000;
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+    // listen on all ports
+    let listener = tokio::net::TcpListener::bind(("0.0.0.0", args.port))
         .await
         .unwrap();
     tracing::debug!("listening on {}", listener.local_addr().unwrap());
@@ -110,4 +107,29 @@ async fn websocket_handler(
 // Include utf-8 file at **compile** time.
 async fn index() -> Html<&'static str> {
     Html(std::include_str!("../client.html"))
+}
+
+fn generate_schemas() {
+    let schema = schema_for!(ClientMessage);
+    fs::write(
+        "./client_message.json",
+        serde_json::to_string_pretty(&schema).unwrap(),
+    )
+    .unwrap();
+
+    let schema = schema_for!(ClientResponse);
+
+    fs::write(
+        "./client_response.json",
+        serde_json::to_string_pretty(&schema).unwrap(),
+    )
+    .unwrap();
+
+    let schema = schema_for!(ClientError);
+
+    fs::write(
+        "./client_error.json",
+        serde_json::to_string_pretty(&schema).unwrap(),
+    )
+    .unwrap();
 }

@@ -6,6 +6,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::fmt::Display;
 use subenum::subenum;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -46,6 +47,10 @@ impl Action {
     pub fn kind(&self) -> Act {
         self.kind
     }
+
+    pub fn claim(&self) -> Option<Card> {
+        self.kind.claim()
+    }
 }
 
 #[subenum(OnlyBlockableAct, OnlyChallengeableAct, ReactableAct, SafeAct)]
@@ -65,6 +70,35 @@ pub enum Act {
     Assassinate { victim: PlayerId },
     #[subenum(SafeAct)]
     Coup { victim: PlayerId },
+}
+
+use std::fmt;
+impl Display for Act {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Act::Income => write!(f, "Take Income"),
+            Act::ForeignAid => write!(f, "Take Foreign Aid"),
+            Act::Tax => write!(f, "Take Tax"),
+            Act::Exchange => write!(f, "Exchange Cards"),
+            Act::Steal { victim } => write!(f, "Take Coins From Player {victim}"),
+            Act::Assassinate { victim } => write!(f, "Assasinate Player {victim}"),
+            Act::Coup { victim } => write!(f, "Coup Player {victim}"),
+        }
+    }
+}
+
+impl Act {
+    pub fn claim(&self) -> Option<Card> {
+        match self {
+            Act::Income => None,
+            Act::ForeignAid => None,
+            Act::Tax => Some(Card::Duke),
+            Act::Exchange => Some(Card::Ambassador),
+            Act::Steal { .. } => Some(Card::Captain),
+            Act::Assassinate { .. } => Some(Card::Assassin),
+            Act::Coup { .. } => None,
+        }
+    }
 }
 
 impl From<&ReactableAct> for ChallengeableAct {
@@ -90,6 +124,19 @@ pub enum BlockableAct {
     },
 }
 
+impl Display for BlockableAct {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BlockableAct::ForeignAid => write!(f, "Take Foreign Aid"),
+            BlockableAct::Steal { victim, claim } => {
+                let claim: Card = claim.into();
+                write!(f, "Steal From {victim} As {claim}")
+            }
+            BlockableAct::Assassinate { victim } => write!(f, "Assasinate {victim}"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub enum Blocks {
     Other(Block),
@@ -97,9 +144,16 @@ pub enum Blocks {
 }
 
 impl Blocks {
-    pub fn blocker_id(&self) -> PlayerId {
+    pub fn blocker(&self) -> PlayerId {
         let (Blocks::Other(block) | Blocks::Steal(block, _)) = self;
         block.blocker
+    }
+
+    pub fn claims(&self, card: Card) -> bool {
+        match self {
+            Blocks::Other(b1) => b1.claim() == card,
+            Blocks::Steal(b1, b2) => b1.claim() == card || b2.claim() == card,
+        }
     }
 }
 
@@ -112,6 +166,23 @@ pub enum ChallengeableAct {
     BlockAssassination,
     BlockForeignAid,
     BlockSteal { claim: BlockStealClaim },
+}
+
+impl Display for ChallengeableAct {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ChallengeableAct::Tax => write!(f, "Take Tax"),
+            ChallengeableAct::Exchange => write!(f, "Exchange Cards"),
+            ChallengeableAct::Steal { victim } => write!(f, "Take Coins From Player {victim}"),
+            ChallengeableAct::Assassinate { victim } => write!(f, "Assasinate Player {victim}"),
+            ChallengeableAct::BlockAssassination => write!(f, "Block Assasination"),
+            ChallengeableAct::BlockForeignAid => write!(f, "Block Foreign Aid"),
+            ChallengeableAct::BlockSteal { claim } => {
+                let claim: Card = claim.into();
+                write!(f, "Block Steal as {claim:?}")
+            }
+        }
+    }
 }
 
 impl From<&ChallengeableAct> for Card {
@@ -145,8 +216,16 @@ pub struct Block {
 }
 
 impl Block {
+    pub fn actor(&self) -> PlayerId {
+        self.actor
+    }
+
     pub fn blocker(&self) -> PlayerId {
         self.blocker
+    }
+
+    pub fn kind(&self) -> &BlockableAct {
+        &self.kind
     }
 
     pub fn claim(&self) -> Card {
@@ -166,7 +245,7 @@ impl Block {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct PossibleActions {
-    pub(crate) current_player: PlayerId,
+    pub(crate) actor: PlayerId,
     pub(crate) assassinations: Vec<Action>,
     pub(crate) coups: Vec<Action>,
     pub(crate) steal: Vec<Action>,
@@ -206,15 +285,28 @@ impl Challenge {
     pub fn challenger(&self) -> PlayerId {
         self.challenger
     }
+
+    pub fn kind(&self) -> &ChallengeableAct {
+        &self.kind
+    }
+
+    pub fn actor(&self) -> PlayerId {
+        self.actor
+    }
 }
 
 #[derive(Debug)]
 pub struct PossibleReactions {
     pub(crate) block: Blocks,
     pub(crate) challenge: HashMap<PlayerId, Challenge>,
+    pub(crate) actor: PlayerId,
 }
 
 impl PossibleReactions {
+    pub fn actor(&self) -> PlayerId {
+        self.actor
+    }
+
     pub fn block(&self) -> &Blocks {
         &self.block
     }
@@ -252,9 +344,14 @@ impl PossibleReactions {
 #[derive(Debug)]
 pub struct PossibleBlocks {
     pub(crate) blocks: HashMap<PlayerId, Block>,
+    pub(crate) actor: PlayerId,
 }
 
 impl PossibleBlocks {
+    pub fn actor(&self) -> PlayerId {
+        self.actor
+    }
+
     pub fn all(&self) -> &HashMap<PlayerId, Block> {
         &self.blocks
     }
@@ -263,10 +360,15 @@ impl PossibleBlocks {
 #[derive(Debug)]
 pub struct PossibleChallenges {
     pub(crate) challenges: HashMap<PlayerId, Challenge>,
+    pub(crate) actor: PlayerId,
 }
 
 impl PossibleChallenges {
     pub fn all(&self) -> &HashMap<PlayerId, Challenge> {
         &self.challenges
+    }
+
+    pub fn actor(&self) -> PlayerId {
+        self.actor
     }
 }

@@ -1,12 +1,12 @@
 use crate::dispatcher::PlayerHalf;
 use overthrow_types::{Info, PlayerView};
 use tokio::select;
-use tokio::time::sleep;
+use tokio::sync::mpsc::Receiver;
 
 use super::dispatcher::GameHalf;
-use futures::future::select_all;
+use futures::future::{join_all, select_all};
 use overthrow_engine::action::{Action, Block, Blocks, Challenge, Reaction};
-use overthrow_engine::deck::{Card, DeadCard, Hand};
+use overthrow_engine::deck::{Card, Hand};
 use overthrow_engine::machine::{
     ActionKind, BlockState, ChallengeState, ChooseOneFromThree, ChooseOneFromThreeState,
     ChooseTwoFromFour, ChooseTwoFromFourState, ChooseVictimCard, ChooseVictimCardState, CoupGame,
@@ -14,15 +14,26 @@ use overthrow_engine::machine::{
     OnlyChallengeableState, Outcome, Reactable, ReactableState, Safe, SafeState, Summary, Wait,
     WaitState,
 };
-use overthrow_engine::players::{PlayerId, Players};
+use overthrow_engine::player_map::PlayerMap;
+use overthrow_engine::players::PlayerId;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::broadcast;
-use tokio::time::timeout;
-use tracing::instrument;
+use tokio::sync::{
+    broadcast::{self, error::SendError as BroadcastError},
+    mpsc::error::SendError as MpscError,
+};
+use tracing::{instrument, trace};
 
-pub type PlayerChannel = (PlayerId, broadcast::Receiver<BroadcastMessage>, PlayerHalf);
+#[derive(Debug)]
+pub struct Pass;
+
+#[derive(Debug)]
+pub struct PlayerGameInfo {
+    pub id: PlayerId,
+    pub broadcast_receiver: broadcast::Receiver<BroadcastMessage>,
+    pub info: Receiver<Info>,
+    pub channels: PlayerHalf,
+}
 
 #[derive(Debug)]
 pub enum Choices {
@@ -43,11 +54,26 @@ pub enum GameMessage {
 
 #[derive(Debug, Clone)]
 pub enum BroadcastMessage {
-    Info(Info),
     Outcome(Outcome),
     End(Summary),
     GameCancelled,
 }
+
+#[derive(Debug, Clone)]
+pub struct PlayerCommunicationError;
+impl<T> From<MpscError<T>> for PlayerCommunicationError {
+    fn from(_: MpscError<T>) -> Self {
+        PlayerCommunicationError
+    }
+}
+
+impl<T> From<BroadcastError<T>> for PlayerCommunicationError {
+    fn from(_: BroadcastError<T>) -> Self {
+        PlayerCommunicationError
+    }
+}
+
+type Result<T> = std::result::Result<T, PlayerCommunicationError>;
 
 impl From<Choices> for GameMessage {
     fn from(choices: Choices) -> Self {
@@ -67,73 +93,93 @@ struct ChannelHandles<'a> {
 pub async fn coup_game(
     mut player_channels: HashMap<PlayerId, GameHalf>,
     broadcaster: Arc<broadcast::Sender<BroadcastMessage>>,
-) -> Summary {
+) -> Result<Summary> {
     let mut game_state = CoupGameState::Wait(CoupGame::with_count(player_channels.len()));
 
     loop {
-        use CoupGameState::*;
+        use CoupGameState as State;
         let handles = ChannelHandles {
             player_channels: &mut player_channels,
             broadcaster: &broadcaster,
         };
 
-        game_state = match game_state {
-            Wait(coup_game) => handle_wait(coup_game, handles).await,
-            ChooseVictimCard(coup_game) => choose_victim_card(coup_game, handles).await,
-            ChooseOneFromThree(coup_game) => choose_one(coup_game, handles).await,
-            ChooseTwoFromFour(coup_game) => choose_two(coup_game, handles).await,
-            End(coup_game) => {
+        // round has started, so we can broadcast the game info to all of the players
+        if let State::Wait(game) = &game_state {
+            let info = game.info();
+
+            tracing::trace!(info = ?info, "Broadcasting game info to each player");
+            for (id, _) in info.players.alive() {
+                let views = get_player_views_for(id, info.players);
+                let (_, channels) = &handles.player_channels[&id];
+                let info = Info {
+                    player_views: views,
+                    current_player: info.current_player,
+                    coins_remaining: info.coins_remaining,
+                };
+
+                channels.info.send(info).await?;
+            }
+        }
+
+        let next_game_state = match game_state {
+            State::Wait(coup_game) => handle_wait(coup_game, handles).await,
+            State::ChooseVictimCard(coup_game) => choose_victim_card(coup_game, handles).await,
+            State::ChooseOneFromThree(coup_game) => choose_one(coup_game, handles).await,
+            State::ChooseTwoFromFour(coup_game) => choose_two(coup_game, handles).await,
+            State::End(coup_game) => {
                 let summary = coup_game.summary();
                 tracing::debug!(winner = ?summary.winner, "Game finished successfully");
                 // end game for all players
-                broadcaster.send(BroadcastMessage::End(summary)).unwrap();
-                break summary;
+                if broadcaster.send(BroadcastMessage::End(summary)).is_err() {
+                    tracing::error!(
+                        "Failed to broadcast info to players (probably all disconnected)"
+                    );
+                }
+                break Ok(summary);
             }
         };
 
-        // round has ended, so we can broadcast the new info to all of the players
-        if let CoupGameState::Wait(game) = &game_state {
-            let info = game.info();
-            let player_views = get_player_views(info.players);
-            let info = Info {
-                player_views,
-                current_player: info.current_player,
-                coins_remaining: info.coins_remaining,
-            };
-
-            tracing::trace!(info = ?info, "Broadcasting info to all players");
-            broadcaster.send(BroadcastMessage::Info(info)).unwrap();
+        match next_game_state {
+            Ok(next_game_state) => game_state = next_game_state,
+            Err(e) => {
+                tracing::error!("Failed to communicate with client (probably disconnected)");
+                break Err(e);
+            }
         }
     }
 }
 
-fn get_player_views(players: &Players) -> HashMap<PlayerId, PlayerView> {
-    let alive_views = players.alive().iter().map(|(id, player)| {
+fn get_player_views_for(player_id: PlayerId, players: &PlayerMap) -> HashMap<PlayerId, PlayerView> {
+    let alive_views = players.alive().map(|(id, player)| {
         let revealed_cards = match player.hand() {
             Hand::Full(..) => Vec::new(),
-            Hand::Last(_, dead) => vec![dead.card()],
+            Hand::Last { dead, .. } => vec![dead],
         };
 
-        (
-            *id,
-            PlayerView {
+        let view = if player_id == id {
+            PlayerView::Me {
+                name: player.name().to_owned(),
+                coins: player.coins().amount(),
+                hand: player.hand().clone(),
+            }
+        } else {
+            PlayerView::Other {
                 name: player.name().to_owned(),
                 coins: player.coins().amount(),
                 revealed_cards,
-            },
-        )
+            }
+        };
+
+        (id, view)
     });
 
-    let dead_views = players.dead().iter().map(|(id, player)| {
-        let revealed_cards = player.cards().iter().map(DeadCard::card).collect();
-        (
-            *id,
-            PlayerView {
-                name: player.name().to_owned(),
-                coins: 0,
-                revealed_cards,
-            },
-        )
+    let dead_views = players.dead().map(|(id, player)| {
+        let view = PlayerView::Other {
+            name: player.name().to_owned(),
+            coins: 0,
+            revealed_cards: player.revealed().into(),
+        };
+        (id, view)
     });
 
     alive_views.chain(dead_views).collect()
@@ -143,7 +189,7 @@ fn get_player_views(players: &Players) -> HashMap<PlayerId, PlayerView> {
 async fn choose_victim_card(
     game: CoupGame<ChooseVictimCard>,
     handles: ChannelHandles<'_>,
-) -> CoupGameState {
+) -> Result<CoupGameState> {
     let choices = game.choices();
     let victim = game.victim();
     tracing::debug!(victim = ?victim, choices = ?choices, "Choosing victim card");
@@ -153,21 +199,22 @@ async fn choose_victim_card(
         .get_mut(&victim)
         .expect("Must exist");
 
-    sender
-        .send(GameMessage::ChooseVictim(choices))
-        .await
-        .unwrap();
+    sender.send(GameMessage::ChooseVictim(choices)).await?;
 
-    let choice = receivers.victim_card.recv().await.unwrap();
+    let choice = receivers
+        .victim_card
+        .recv()
+        .await
+        .ok_or(PlayerCommunicationError)?;
     tracing::debug!(victim = ?victim, choice = ?choice, possible_choices = ?choices, "Received choice");
-    CoupGameState::Wait(game.advance(choice))
+    Ok(CoupGameState::Wait(game.advance(choice)))
 }
 
 #[instrument(skip_all)]
 async fn choose_one(
     game: CoupGame<ChooseOneFromThree>,
     handles: ChannelHandles<'_>,
-) -> CoupGameState {
+) -> Result<CoupGameState> {
     let choices = game.choices();
     let actor = game.actor();
     tracing::debug!(actor = ?actor, choices = ?choices, "Exchanging one card from three");
@@ -176,70 +223,76 @@ async fn choose_one(
 
     sender
         .send(GameMessage::ChooseOneFromThree(choices))
-        .await
-        .unwrap();
+        .await?;
 
-    let choice = receivers.choose_one.recv().await.unwrap();
+    let choice = receivers
+        .choose_one
+        .recv()
+        .await
+        .ok_or(PlayerCommunicationError)?;
     tracing::debug!(actor = ?actor, choice = ?choice, possible_choices = ?choices, "Received choice");
-    CoupGameState::Wait(game.advance(choice))
+    Ok(CoupGameState::Wait(game.advance(choice)))
 }
 
 #[instrument(skip_all)]
 async fn choose_two(
     game: CoupGame<ChooseTwoFromFour>,
     handles: ChannelHandles<'_>,
-) -> CoupGameState {
+) -> Result<CoupGameState> {
     let choices = game.choices();
     let actor = game.actor();
     tracing::debug!(actor = ?actor, choices = ?choices, "Exchanging two cards from four");
 
     let (sender, receivers) = handles.player_channels.get_mut(&actor).expect("Must exist");
 
-    sender
-        .send(GameMessage::ChooseTwoFromFour(choices))
-        .await
-        .unwrap();
+    sender.send(GameMessage::ChooseTwoFromFour(choices)).await?;
 
-    let chosen = receivers.choose_two.recv().await.unwrap();
+    let chosen = receivers
+        .choose_two
+        .recv()
+        .await
+        .ok_or(PlayerCommunicationError)?;
     tracing::debug!(actor = ?actor, choice = ?chosen, possible_choices = ?choices, "Received choice");
-    CoupGameState::Wait(game.advance(chosen))
+    Ok(CoupGameState::Wait(game.advance(chosen)))
 }
 
-async fn handle_wait(game: CoupGame<Wait>, handles: ChannelHandles<'_>) -> CoupGameState {
+async fn handle_wait(game: CoupGame<Wait>, handles: ChannelHandles<'_>) -> Result<CoupGameState> {
     let actions: Vec<Action> = game.actions().all().cloned().collect();
     let current_player = game.info().current_player;
 
     let (sender, receivers) = handles
         .player_channels
         .get_mut(&current_player)
-        .expect("Always a valid player");
+        .expect("Must exist");
 
     tracing::trace!(actions = ?actions, "Sending choices to client");
-    sender.send(Choices::Actions(actions).into()).await.unwrap();
+    sender.send(Choices::Actions(actions).into()).await?;
 
-    let choice = receivers.action.recv().await.unwrap();
+    let choice = receivers
+        .action
+        .recv()
+        .await
+        .ok_or(PlayerCommunicationError)?;
     tracing::trace!(chosen_action = ?choice, "Received choice");
 
-    use ActionKind::*;
+    use ActionKind as A;
     match game.play(choice) {
-        Safe(coup_game) => handle_safe(coup_game, handles.broadcaster).await,
-        OnlyChallengeable(coup_game) => handle_challengeable(coup_game, handles).await,
-        OnlyBlockable(coup_game) => handle_blockable(coup_game, handles).await,
-        Reactable(coup_game) => handle_reactable(coup_game, handles).await,
+        A::Safe(coup_game) => handle_safe(coup_game, handles.broadcaster).await,
+        A::OnlyChallengeable(coup_game) => handle_challengeable(coup_game, handles).await,
+        A::OnlyBlockable(coup_game) => handle_blockable(coup_game, handles).await,
+        A::Reactable(coup_game) => handle_reactable(coup_game, handles).await,
     }
 }
 
 async fn handle_safe(
     game: CoupGame<Safe>,
     broadcaster: &broadcast::Sender<BroadcastMessage>,
-) -> CoupGameState {
+) -> Result<CoupGameState> {
     // safe actions always succeed, so we broadcast outcome and continue game
     let outcome = game.outcome();
-    broadcaster
-        .send(BroadcastMessage::Outcome(outcome))
-        .unwrap();
+    broadcaster.send(BroadcastMessage::Outcome(outcome))?;
 
-    game.advance()
+    Ok(game.advance())
 }
 
 async fn handle_challengeable(
@@ -248,27 +301,40 @@ async fn handle_challengeable(
         player_channels,
         broadcaster,
     }: ChannelHandles<'_>,
-) -> CoupGameState {
-    send_challenges(game.challenges().all(), player_channels).await;
+) -> Result<CoupGameState> {
+    let challenges = game.challenges();
 
-    let challenges = player_channels
-        .values_mut()
-        .map(|(_, receivers)| Box::pin(receivers.challenge.recv()));
+    // send challenges to client handlers
+    trace!("Sending challenges to client handlers");
+    send_challenges(challenges.all(), player_channels).await?;
 
-    // if someone challenges within the 10 second window
-    if let Ok((Some(challenge), _, _)) =
-        timeout(Duration::from_secs(10), select_all(challenges)).await
-    {
-        let game = game.challenge(challenge);
-        broadcaster
-            .send(BroadcastMessage::Outcome(game.outcome()))
-            .unwrap();
+    let (challenges, passes): (Vec<_>, Vec<_>) = player_channels
+        .iter_mut()
+        .filter_map(|(id, channels)| (*id != challenges.actor()).then_some(channels))
+        .map(|(_, receivers)| {
+            (
+                Box::pin(receivers.challenge.recv()),
+                Box::pin(receivers.pass.recv()),
+            )
+        })
+        .collect();
 
-        return game.advance();
+    let challenges = select_all(challenges);
+    let passes = join_all(passes);
+
+    select! {
+        // if someone challenges within the 10 second window
+        (Some(challenge), _, _) = challenges => {
+            let game = game.challenge(challenge);
+            broadcaster.send(BroadcastMessage::Outcome(game.outcome()))?;
+            Ok(game.advance())
+        },
+        // all potential challengers have passed on challenging
+        _ = passes => {
+            broadcaster.send(BroadcastMessage::Outcome(game.outcome()))?;
+            Ok(game.advance())
+        },
     }
-
-    // since no one has challenged, the action must continue
-    game.advance()
 }
 
 async fn handle_reactable(
@@ -277,44 +343,57 @@ async fn handle_reactable(
         player_channels,
         broadcaster,
     }: ChannelHandles<'_>,
-) -> CoupGameState {
-    send_reactions(game.reactions().all(), player_channels).await;
+) -> Result<CoupGameState> {
+    let reactions = game.reactions();
 
-    let blocks = game.reactions().block().clone();
-    let blocker_id = blocks.blocker_id();
+    // send client handlers all reactions
+    trace!("Sending reactions to client handlers");
+    send_reactions(reactions.all(), player_channels).await?;
 
-    // normally wouldn't need to allocate a vector, but we can't split player_channel
-    // borrows
-    let (Some(blocker), challenges) = player_channels.iter_mut().fold(
-        (None, Vec::new()),
-        |(mut blocker, mut challenges), (id, (_, receivers))| {
-            if *id == blocker_id {
-                blocker = Some(receivers.block.recv());
+    let blocker = reactions.block().blocker();
+    let actor = reactions.actor();
+
+    let mut block = None;
+    let (challenges, passes): (Vec<_>, Vec<_>) = player_channels
+        .iter_mut()
+        .filter(|(id, _)| **id != actor)
+        .flat_map(|(id, (_, receivers))| {
+            // no non-constant split mutable borrows of hashmap :(
+            if *id == blocker {
+                let fut = Box::pin(receivers.block.recv());
+                block = Some(fut);
             }
-            challenges.push(Box::pin(receivers.challenge.recv()));
+            Some((
+                Box::pin(receivers.challenge.recv()),
+                Box::pin(receivers.pass.recv()),
+            ))
+        })
+        .collect();
 
-            (blocker, challenges)
-        },
-    ) else {
-        unreachable!()
-    };
+    let block = block.expect("Must be set");
+    let passes = join_all(passes);
+    let challenges = select_all(challenges);
 
     // race between the victim blocking, anyone challenging, and a 10 second timeout
     select! {
-        Some(block) = blocker => {
+        // someone blocks within 10 second timeframe
+        Some(block) = block => {
+            // FIXME: handle challenging a block
             let game = game.block(block);
-            broadcaster.send(BroadcastMessage::Outcome(game.outcome())).unwrap();
-            CoupGameState::Wait(game.advance())
+            broadcaster.send(BroadcastMessage::Outcome(game.outcome()))?;
+            Ok(CoupGameState::Wait(game.advance()))
         },
-        (Some(challenge), _, _) = select_all(challenges) => {
+        // someone challenges within 10 second timeframe
+        (Some(challenge), _, _) = challenges => {
             let game = game.challenge(challenge);
-            broadcaster.send(BroadcastMessage::Outcome(game.outcome())).unwrap();
-            game.advance()
+            broadcaster.send(BroadcastMessage::Outcome(game.outcome()))?;
+            Ok(game.advance())
         },
-        _ = sleep(Duration::from_secs(10)) => {
-            broadcaster.send(BroadcastMessage::Outcome(game.outcome())).unwrap();
-            game.advance()
-        },
+        // all potential reactors pass
+        _ = passes => {
+            broadcaster.send(BroadcastMessage::Outcome(game.outcome()))?;
+            Ok(game.advance())
+        }
     }
 }
 
@@ -324,62 +403,79 @@ async fn handle_blockable(
         player_channels,
         broadcaster,
     }: ChannelHandles<'_>,
-) -> CoupGameState {
-    send_blocks(game.blocks().all(), player_channels).await;
+) -> Result<CoupGameState> {
+    let blocks = game.blocks();
 
-    let blocks = player_channels
-        .values_mut()
-        .map(|(_, receivers)| Box::pin(receivers.block.recv()));
+    // send client handlers the possible blocks
+    trace!("Sending blocks to client handlers");
+    send_blocks(blocks.all(), player_channels).await?;
+
+    let (blocks, passes): (Vec<_>, Vec<_>) = player_channels
+        .iter_mut()
+        .filter_map(|(id, (_, receivers))| (*id != blocks.actor()).then_some(receivers))
+        .map(|receivers| {
+            (
+                Box::pin(receivers.block.recv()),
+                Box::pin(receivers.pass.recv()),
+            )
+        })
+        .collect();
+
+    let blocks = select_all(blocks);
+    let passes = join_all(passes);
 
     // if someone blocks within the 10 second window
-    if let Ok((Some(block), _, _)) = timeout(Duration::from_secs(10), select_all(blocks)).await {
-        let game = game.block(block);
-        broadcaster
-            .send(BroadcastMessage::Outcome(game.outcome()))
-            .unwrap();
+    select! {
+        (Some(block), _, _) = blocks => {
+            // FIXME: handle challenging a block
+            let game = game.block(block);
+            broadcaster.send(BroadcastMessage::Outcome(game.outcome()))?;
 
-        CoupGameState::Wait(game.advance())
-    } else {
-        // since no one has blocked, the action must continue
-        CoupGameState::Wait(game.advance())
+            Ok(CoupGameState::Wait(game.advance()))
+        },
+        _ = passes => {
+            broadcaster.send(BroadcastMessage::Outcome(game.outcome()))?;
+            Ok(CoupGameState::Wait(game.advance()))
+        },
     }
 }
 
 async fn send_blocks(
     blocks: &HashMap<PlayerId, Block>,
     player_channels: &mut HashMap<PlayerId, GameHalf>,
-) {
+) -> Result<()> {
     for (id, block) in blocks {
         let (sender, _) = player_channels.get_mut(id).expect("Must exist");
         sender
             .send(Choices::Block(Blocks::Other(block.clone())).into())
-            .await
-            .unwrap();
+            .await?;
     }
+
+    Ok(())
 }
 
 async fn send_challenges(
     challenges: &HashMap<PlayerId, Challenge>,
     player_channels: &mut HashMap<PlayerId, GameHalf>,
-) {
+) -> Result<()> {
     for (id, challenge) in challenges {
         let (sender, _) = player_channels.get_mut(id).expect("Must exist");
         sender
             .send(Choices::Challenge(challenge.clone()).into())
-            .await
-            .unwrap();
+            .await?;
     }
+
+    Ok(())
 }
 
 async fn send_reactions(
     reactions: HashMap<PlayerId, Vec<Reaction>>,
     player_channels: &mut HashMap<PlayerId, GameHalf>,
-) {
+) -> Result<()> {
     for (id, reaction) in reactions {
         let (sender, _) = player_channels.get_mut(&id).expect("Must exist");
-        sender
-            .send(Choices::Reactions(reaction).into())
-            .await
-            .unwrap();
+        sender.send(Choices::Reactions(reaction).into()).await?;
     }
+
+    Ok(())
 }
