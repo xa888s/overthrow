@@ -61,33 +61,20 @@ impl From<&BlockStealClaim> for Card {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub enum Hand {
     Full(Card, Card),
-    Last(Card, DeadCard),
+    Last { alive: Card, dead: Card },
 }
 
 impl Hand {
     pub(crate) fn has_card(&self, card: Card) -> bool {
         match self {
             Hand::Full(c1, c2) => *c1 == card || *c2 == card,
-            Hand::Last(c1, _) => *c1 == card,
+            Hand::Last { alive, .. } => *alive == card,
         }
     }
 }
-
-#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
-#[serde(transparent)]
-pub struct DeadCard(pub(crate) Card);
-
-impl DeadCard {
-    pub fn card(&self) -> Card {
-        self.0
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct DeadHand(pub(crate) DeadCard, pub(crate) DeadCard);
 
 #[derive(Debug, Clone)]
 pub struct Deck {

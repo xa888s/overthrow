@@ -1,12 +1,12 @@
 use crate::dispatcher::PlayerHalf;
 use overthrow_types::{Info, PlayerView};
 use tokio::select;
-use tokio::time::{Instant, timeout, timeout_at};
+use tokio::sync::mpsc::Receiver;
 
 use super::dispatcher::GameHalf;
-use futures::future::select_all;
+use futures::future::{join_all, select_all};
 use overthrow_engine::action::{Action, Block, Blocks, Challenge, Reaction};
-use overthrow_engine::deck::{Card, DeadCard, Hand};
+use overthrow_engine::deck::{Card, Hand};
 use overthrow_engine::machine::{
     ActionKind, BlockState, ChallengeState, ChooseOneFromThree, ChooseOneFromThreeState,
     ChooseTwoFromFour, ChooseTwoFromFourState, ChooseVictimCard, ChooseVictimCardState, CoupGame,
@@ -14,20 +14,24 @@ use overthrow_engine::machine::{
     OnlyChallengeableState, Outcome, Reactable, ReactableState, Safe, SafeState, Summary, Wait,
     WaitState,
 };
-use overthrow_engine::players::{PlayerId, Players};
+use overthrow_engine::player_map::PlayerMap;
+use overthrow_engine::players::PlayerId;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::{
     broadcast::{self, error::SendError as BroadcastError},
     mpsc::error::SendError as MpscError,
 };
-use tracing::instrument;
+use tracing::{instrument, trace};
+
+#[derive(Debug)]
+pub struct Pass;
 
 #[derive(Debug)]
 pub struct PlayerGameInfo {
     pub id: PlayerId,
     pub broadcast_receiver: broadcast::Receiver<BroadcastMessage>,
+    pub info: Receiver<Info>,
     pub channels: PlayerHalf,
 }
 
@@ -50,11 +54,9 @@ pub enum GameMessage {
 
 #[derive(Debug, Clone)]
 pub enum BroadcastMessage {
-    Info(Info),
     Outcome(Outcome),
     End(Summary),
     GameCancelled,
-    ReactionTimeout,
 }
 
 #[derive(Debug, Clone)]
@@ -104,17 +106,18 @@ pub async fn coup_game(
         // round has started, so we can broadcast the game info to all of the players
         if let State::Wait(game) = &game_state {
             let info = game.info();
-            let player_views = get_player_views(info.players);
-            let info = Info {
-                player_views,
-                current_player: info.current_player,
-                coins_remaining: info.coins_remaining,
-            };
 
-            tracing::trace!(info = ?info, "Broadcasting game info to all players");
-            if broadcaster.send(BroadcastMessage::Info(info)).is_err() {
-                tracing::error!("Failed to broadcast info to players (probably all disconnected)");
-                break Err(PlayerCommunicationError);
+            tracing::trace!(info = ?info, "Broadcasting game info to each player");
+            for (id, _) in info.players.alive() {
+                let views = get_player_views_for(id, info.players);
+                let (_, channels) = &handles.player_channels[&id];
+                let info = Info {
+                    player_views: views,
+                    current_player: info.current_player,
+                    coins_remaining: info.coins_remaining,
+                };
+
+                channels.info.send(info).await?;
             }
         }
 
@@ -146,33 +149,37 @@ pub async fn coup_game(
     }
 }
 
-fn get_player_views(players: &Players) -> HashMap<PlayerId, PlayerView> {
-    let alive_views = players.alive().iter().map(|(id, player)| {
+fn get_player_views_for(player_id: PlayerId, players: &PlayerMap) -> HashMap<PlayerId, PlayerView> {
+    let alive_views = players.alive().map(|(id, player)| {
         let revealed_cards = match player.hand() {
             Hand::Full(..) => Vec::new(),
-            Hand::Last(_, dead) => vec![dead.card()],
+            Hand::Last { dead, .. } => vec![dead],
         };
 
-        (
-            *id,
-            PlayerView {
+        let view = if player_id == id {
+            PlayerView::Me {
+                name: player.name().to_owned(),
+                coins: player.coins().amount(),
+                hand: player.hand().clone(),
+            }
+        } else {
+            PlayerView::Other {
                 name: player.name().to_owned(),
                 coins: player.coins().amount(),
                 revealed_cards,
-            },
-        )
+            }
+        };
+
+        (id, view)
     });
 
-    let dead_views = players.dead().iter().map(|(id, player)| {
-        let revealed_cards = player.cards().iter().map(DeadCard::card).collect();
-        (
-            *id,
-            PlayerView {
-                name: player.name().to_owned(),
-                coins: 0,
-                revealed_cards,
-            },
-        )
+    let dead_views = players.dead().map(|(id, player)| {
+        let view = PlayerView::Other {
+            name: player.name().to_owned(),
+            coins: 0,
+            revealed_cards: player.revealed().into(),
+        };
+        (id, view)
     });
 
     alive_views.chain(dead_views).collect()
@@ -295,25 +302,39 @@ async fn handle_challengeable(
         broadcaster,
     }: ChannelHandles<'_>,
 ) -> Result<CoupGameState> {
-    send_challenges(game.challenges().all(), player_channels).await?;
+    let challenges = game.challenges();
 
-    let challenges = player_channels
-        .values_mut()
-        .map(|(_, receivers)| Box::pin(receivers.challenge.recv()));
+    // send challenges to client handlers
+    trace!("Sending challenges to client handlers");
+    send_challenges(challenges.all(), player_channels).await?;
 
-    // if someone challenges within the 10 second window
-    if let Ok((Some(challenge), _, _)) =
-        timeout(Duration::from_secs(10), select_all(challenges)).await
-    {
-        let game = game.challenge(challenge);
-        broadcaster.send(BroadcastMessage::Outcome(game.outcome()))?;
+    let (challenges, passes): (Vec<_>, Vec<_>) = player_channels
+        .iter_mut()
+        .filter_map(|(id, channels)| (*id != challenges.actor()).then_some(channels))
+        .map(|(_, receivers)| {
+            (
+                Box::pin(receivers.challenge.recv()),
+                Box::pin(receivers.pass.recv()),
+            )
+        })
+        .collect();
 
-        return Ok(game.advance());
+    let challenges = select_all(challenges);
+    let passes = join_all(passes);
+
+    select! {
+        // if someone challenges within the 10 second window
+        (Some(challenge), _, _) = challenges => {
+            let game = game.challenge(challenge);
+            broadcaster.send(BroadcastMessage::Outcome(game.outcome()))?;
+            Ok(game.advance())
+        },
+        // all potential challengers have passed on challenging
+        _ = passes => {
+            broadcaster.send(BroadcastMessage::Outcome(game.outcome()))?;
+            Ok(game.advance())
+        },
     }
-
-    // since no one has challenged, the action must continue
-    broadcaster.send(BroadcastMessage::ReactionTimeout)?;
-    Ok(game.advance())
 }
 
 async fn handle_reactable(
@@ -323,47 +344,56 @@ async fn handle_reactable(
         broadcaster,
     }: ChannelHandles<'_>,
 ) -> Result<CoupGameState> {
-    send_reactions(game.reactions().all(), player_channels).await?;
+    let reactions = game.reactions();
 
-    let blocks = game.reactions().block().clone();
-    let blocker_id = blocks.blocker_id();
+    // send client handlers all reactions
+    trace!("Sending reactions to client handlers");
+    send_reactions(reactions.all(), player_channels).await?;
 
-    // normally wouldn't need to allocate a vector, but we can't split player_channel
-    // borrows
-    let (Some(blocker), challenges) = player_channels.iter_mut().fold(
-        (None, Vec::new()),
-        |(mut blocker, mut challenges), (id, (_, receivers))| {
-            if *id == blocker_id {
-                blocker = Some(receivers.block.recv());
+    let blocker = reactions.block().blocker();
+    let actor = reactions.actor();
+
+    let mut block = None;
+    let (challenges, passes): (Vec<_>, Vec<_>) = player_channels
+        .iter_mut()
+        .filter(|(id, _)| **id != actor)
+        .flat_map(|(id, (_, receivers))| {
+            // no non-constant split mutable borrows of hashmap :(
+            if *id == blocker {
+                let fut = Box::pin(receivers.block.recv());
+                block = Some(fut);
             }
-            challenges.push(Box::pin(receivers.challenge.recv()));
+            Some((
+                Box::pin(receivers.challenge.recv()),
+                Box::pin(receivers.pass.recv()),
+            ))
+        })
+        .collect();
 
-            (blocker, challenges)
-        },
-    ) else {
-        unreachable!()
-    };
-
-    // set 10 second timer
-    let delay = Instant::now() + Duration::from_secs(10);
+    let block = block.expect("Must be set");
+    let passes = join_all(passes);
+    let challenges = select_all(challenges);
 
     // race between the victim blocking, anyone challenging, and a 10 second timeout
     select! {
-        Ok(Some(block)) = timeout_at(delay, blocker) => {
+        // someone blocks within 10 second timeframe
+        Some(block) = block => {
+            // FIXME: handle challenging a block
             let game = game.block(block);
             broadcaster.send(BroadcastMessage::Outcome(game.outcome()))?;
             Ok(CoupGameState::Wait(game.advance()))
         },
-        Ok((Some(challenge), _, _)) = timeout_at(delay, select_all(challenges)) => {
+        // someone challenges within 10 second timeframe
+        (Some(challenge), _, _) = challenges => {
             let game = game.challenge(challenge);
             broadcaster.send(BroadcastMessage::Outcome(game.outcome()))?;
             Ok(game.advance())
         },
-        else => {
-            broadcaster.send(BroadcastMessage::ReactionTimeout)?;
+        // all potential reactors pass
+        _ = passes => {
             broadcaster.send(BroadcastMessage::Outcome(game.outcome()))?;
             Ok(game.advance())
-        },
+        }
     }
 }
 
@@ -374,22 +404,39 @@ async fn handle_blockable(
         broadcaster,
     }: ChannelHandles<'_>,
 ) -> Result<CoupGameState> {
-    send_blocks(game.blocks().all(), player_channels).await?;
+    let blocks = game.blocks();
 
-    let blocks = player_channels
-        .values_mut()
-        .map(|(_, receivers)| Box::pin(receivers.block.recv()));
+    // send client handlers the possible blocks
+    trace!("Sending blocks to client handlers");
+    send_blocks(blocks.all(), player_channels).await?;
+
+    let (blocks, passes): (Vec<_>, Vec<_>) = player_channels
+        .iter_mut()
+        .filter_map(|(id, (_, receivers))| (*id != blocks.actor()).then_some(receivers))
+        .map(|receivers| {
+            (
+                Box::pin(receivers.block.recv()),
+                Box::pin(receivers.pass.recv()),
+            )
+        })
+        .collect();
+
+    let blocks = select_all(blocks);
+    let passes = join_all(passes);
 
     // if someone blocks within the 10 second window
-    if let Ok((Some(block), _, _)) = timeout(Duration::from_secs(10), select_all(blocks)).await {
-        let game = game.block(block);
-        broadcaster.send(BroadcastMessage::Outcome(game.outcome()))?;
+    select! {
+        (Some(block), _, _) = blocks => {
+            // FIXME: handle challenging a block
+            let game = game.block(block);
+            broadcaster.send(BroadcastMessage::Outcome(game.outcome()))?;
 
-        Ok(CoupGameState::Wait(game.advance()))
-    } else {
-        // since no one has blocked, the action must continue
-        broadcaster.send(BroadcastMessage::ReactionTimeout)?;
-        Ok(CoupGameState::Wait(game.advance()))
+            Ok(CoupGameState::Wait(game.advance()))
+        },
+        _ = passes => {
+            broadcaster.send(BroadcastMessage::Outcome(game.outcome()))?;
+            Ok(CoupGameState::Wait(game.advance()))
+        },
     }
 }
 

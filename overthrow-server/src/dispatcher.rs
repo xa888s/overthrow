@@ -1,5 +1,5 @@
 use crate::Disconnected;
-use crate::game::{BroadcastMessage, PlayerCommunicationError, PlayerGameInfo};
+use crate::game::{BroadcastMessage, Pass, PlayerCommunicationError, PlayerGameInfo};
 
 use super::game::GameMessage;
 
@@ -7,7 +7,7 @@ use super::game::coup_game;
 use overthrow_engine::action::{Action, Block, Challenge};
 use overthrow_engine::deck::Card;
 use overthrow_engine::players::PlayerId;
-use overthrow_types::Summary;
+use overthrow_types::{Info, Summary};
 use std::collections::HashMap;
 use std::mem;
 use std::sync::Arc;
@@ -19,33 +19,36 @@ use tokio::task::JoinHandle;
 use tracing::instrument;
 use uuid::Uuid;
 
-pub type PlayerHalf = (Senders, Receiver<GameMessage>);
-pub type GameHalf = (Sender<GameMessage>, Receivers);
+pub type PlayerHalf = (ClientChannels, Receiver<GameMessage>);
+pub type GameHalf = (Sender<GameMessage>, GameChannels);
 pub type TaskReceiver = Receiver<(oneshot::Sender<PlayerGameInfo>, oneshot::Sender<Uuid>)>;
 type Channels = (Vec<PlayerGameInfo>, HashMap<PlayerId, GameHalf>);
 
 // Each client has 6 senders and 1 receiver:
 // The receiver receives GameMessages, while the senders are for different types of choices (Action, Challenge, choosing, etc.)
 #[derive(Debug)]
-pub struct Senders {
+pub struct ClientChannels {
     pub action: Sender<Action>,
     pub challenge: Sender<Challenge>,
     pub block: Sender<Block>,
     pub victim_card: Sender<Card>,
     pub choose_one: Sender<Card>,
     pub choose_two: Sender<[Card; 2]>,
+    pub pass: Sender<Pass>,
 }
 
 // The game task has 6 receivers and 1 sender per client
 // The sender is for GameMessages, and the receivers are for receiving game messages depending on which type it is
 #[derive(Debug)]
-pub struct Receivers {
+pub struct GameChannels {
     pub action: Receiver<Action>,
     pub challenge: Receiver<Challenge>,
     pub block: Receiver<Block>,
     pub victim_card: Receiver<Card>,
     pub choose_one: Receiver<Card>,
     pub choose_two: Receiver<[Card; 2]>,
+    pub info: Sender<Info>,
+    pub pass: Receiver<Pass>,
 }
 
 // information for a given game/lobby
@@ -72,29 +75,35 @@ fn generate_channels(
             let (victim_tx, victim_rx) = mpsc::channel(1);
             let (choose_one_tx, choose_one_rx) = mpsc::channel(1);
             let (choose_two_tx, choose_two_rx) = mpsc::channel(1);
+            let (info_tx, info_rx) = mpsc::channel(1);
+            let (pass_tx, pass_rx) = mpsc::channel(1);
 
-            let senders = Senders {
+            let senders = ClientChannels {
                 action: action_tx,
                 challenge: challenge_tx,
                 block: block_tx,
                 victim_card: victim_tx,
                 choose_one: choose_one_tx,
                 choose_two: choose_two_tx,
+                pass: pass_tx,
             };
 
-            let receivers = Receivers {
+            let receivers = GameChannels {
                 action: action_rx,
                 challenge: challenge_rx,
                 block: block_rx,
                 victim_card: victim_rx,
                 choose_one: choose_one_rx,
                 choose_two: choose_two_rx,
+                info: info_tx,
+                pass: pass_rx,
             };
 
             let player_half = PlayerGameInfo {
                 id,
                 broadcast_receiver: broadcaster.subscribe(),
                 channels: (senders, player_rx),
+                info: info_rx,
             };
             let game_half = (id, (game_tx, receivers));
             (player_half, game_half)

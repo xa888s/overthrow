@@ -6,5 +6,7 @@ edition = "2024"
 [dependencies]
 overthrow-engine = { path = "../overthrow-engine" }
 serde = { version = "1.0.219", features = ["derive"] }
-schemars = { version = "1.0.4", features = ["uuid1"] }
+schemars = { version = "1.0.4", features = ["uuid1", "jiff02"] }
 uuid = { version = "1.18.1", features = ["v7", "serde"] }
+jiff = { version = "0.2.15", features = ["serde"] }
+thiserror = "2.0.17"

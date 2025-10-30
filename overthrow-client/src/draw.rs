@@ -1,11 +1,11 @@
 use itertools::Itertools;
-use overthrow_types::{Info, PlayerId};
+use overthrow_types::{Info, PlayerId, PlayerView};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
     style::Stylize,
     text::Line,
-    widgets::{Block, List, ListState, Paragraph},
+    widgets::{Block, List, Paragraph},
 };
 use tui_big_text::{BigText, PixelSize};
 use uuid::Uuid;
@@ -37,18 +37,27 @@ fn draw_info_view(player_id: PlayerId, info: &Info, area: Rect, f: &mut Frame) {
 
     // create blocks for each player view
     for (area, (id, view)) in player_info_areas.iter().zip(player_views) {
-        let num_id = *id as u8;
-        let title = Line::from(format!("Player {num_id}"));
-        let title = if *id == player_id {
-            title.underlined()
-        } else {
-            title
+        let title = Line::from(format!("Player {id}"));
+        let (view, title) = match view {
+            PlayerView::Other {
+                name,
+                coins,
+                revealed_cards,
+            } => {
+                let view = format!(
+                    "Name: {}\nCoins: {}\nCards: {:?}",
+                    name, coins, revealed_cards
+                );
+
+                (view, title)
+            }
+            PlayerView::Me { name, coins, hand } => {
+                let view = format!("Name: {}\nCoins: {}\nHand: {:?}", name, coins, hand);
+
+                (view, title.underlined())
+            }
         };
         let block = Block::bordered().title_top(title);
-        let view = format!(
-            "Name: {}\nCoins: {}\nCards: {:?}",
-            view.name, view.coins, view.revealed_cards
-        );
         let paragraph = Paragraph::new(view).block(block);
         f.render_widget(paragraph, *area);
     }
@@ -60,9 +69,9 @@ fn draw_input_view(game_id: Uuid, ui_state: &mut UiState, area: Rect, f: &mut Fr
         .map(|c| c.kind())
         .unwrap_or("Waiting for choices...");
     let block = Block::bordered().title_top(format!("Input (Game ID: {game_id}) => {kind}"));
-    let items = choices.map(|c| c.choices()).unwrap_or_else(Vec::new);
+    let items = choices.map(|c| c.choices()).unwrap_or_default();
 
-    let list = List::new(items).block(block);
+    let list = List::new(items).block(block).highlight_symbol(">> ");
 
     f.render_stateful_widget(list, area, &mut ui_state.state);
 }

@@ -1,15 +1,16 @@
+use crate::player_map::PlayerMap;
+
 use super::action::{
     self, BlockableAct, OnlyChallengeableAct, PossibleActions, PossibleBlocks, PossibleChallenges,
     PossibleReactions, ReactableAct, SafeAct,
 };
 use super::coins::{Deposit, Withdrawal};
-use super::deck::{DeadCard, Hand};
+use super::deck::Hand;
 
 use super::action::{Act, Action};
 use super::coins::CoinPile;
 use super::deck::{Card, Deck};
 use super::machine::*;
-use super::players::{Player, PlayerId, Players, RawPlayers};
 use itertools::{Itertools, izip};
 
 impl WaitState for CoupGame<Wait> {
@@ -21,9 +22,8 @@ impl WaitState for CoupGame<Wait> {
         let (coins, player_coins) = CoinPile::with_count(count);
 
         // compile initial player data
-        let data = izip!(players, player_coins, hands)
-            .map(|(name, coins, hand)| Player::new(name, coins, hand));
-        let players = Players::with_players(PlayerId::iter().zip(data));
+        let data = izip!(players, player_coins, hands);
+        let players = PlayerMap::new(data);
         let data = Box::new(CoupData {
             players,
             coins,
@@ -40,16 +40,25 @@ impl WaitState for CoupGame<Wait> {
         }
     }
 
-    fn with_players(players: RawPlayers) -> CoupGame<Wait> {
-        let RawPlayers(players, player_count) = players;
+    fn with_player_names<T>(players: T) -> CoupGame<Wait>
+    where
+        T: IntoIterator,
+        T::Item: AsRef<str>,
+    {
+        let names: Vec<_> = players
+            .into_iter()
+            .map(|name| name.as_ref().to_owned())
+            .collect();
+
+        assert!((2..=6).contains(&names.len()));
+        let player_count = names.len() as u8;
 
         let (deck, hands) = Deck::with_count(player_count);
         let (coins, player_coins) = CoinPile::with_count(player_count);
 
         // compile initial player data
-        let data = izip!(players, player_coins, hands)
-            .map(|(name, coins, hand)| Player::new(name, coins, hand));
-        let players = Players::with_players(PlayerId::iter().zip(data));
+        let data = izip!(names, player_coins, hands);
+        let players = PlayerMap::new(data);
         let data = Box::new(CoupData {
             players,
             coins,
@@ -85,7 +94,7 @@ impl WaitState for CoupGame<Wait> {
         match action.kind {
             Act::Assassinate { victim } => {
                 let kind = ReactableAct::Assassinate { victim };
-                let possible_reactions = players.generate_reactions_against(actor, &kind);
+                let possible_reactions = players.generate_reactions_against(actor, kind);
                 ActionKind::Reactable(self.transition_with_state(Reactable {
                     actor,
                     kind,
@@ -119,7 +128,7 @@ impl WaitState for CoupGame<Wait> {
             }
             Act::Steal { victim } => {
                 let kind = ReactableAct::Steal { victim };
-                let possible_reactions = players.generate_reactions_against(actor, &kind);
+                let possible_reactions = players.generate_reactions_against(actor, kind);
 
                 ActionKind::Reactable(self.transition_with_state(Reactable {
                     actor,
@@ -271,7 +280,7 @@ impl OnlyChallengeableState for CoupGame<OnlyChallengeable> {
                             choices: [c1, c2, c3, c4],
                         },
                     }),
-                    Hand::Last(c3, _) => GameState::ChooseOneFromThree(CoupGame {
+                    Hand::Last { alive: c3, .. } => GameState::ChooseOneFromThree(CoupGame {
                         data: self.data,
                         state: ChooseOneFromThree {
                             actor: self.state.actor,
@@ -329,7 +338,10 @@ impl ChooseVictimCardState for CoupGame<ChooseVictimCard> {
             panic!("Choice must be valid")
         };
 
-        let hand = Hand::Last(remaining_card, DeadCard(choice));
+        let hand = Hand::Last {
+            alive: remaining_card,
+            dead: choice,
+        };
         self.data.players.exchange(self.state.victim, hand);
 
         self.end_turn()
@@ -352,10 +364,13 @@ impl ChooseOneFromThreeState for CoupGame<ChooseOneFromThree> {
             panic!("Invalid choice provided: {:?}", choice);
         };
 
-        let Hand::Last(_, dead) = self.data.players.hand_for(self.state.actor) else {
+        let Hand::Last { dead, .. } = self.data.players.hand_for(self.state.actor) else {
             panic!("Must be on last card")
         };
-        let hand = Hand::Last(choice, dead);
+        let hand = Hand::Last {
+            alive: choice,
+            dead,
+        };
         self.data.players.exchange(self.state.actor, hand);
 
         // getting other two cards to return them to the deck
@@ -477,18 +492,8 @@ impl BlockState for CoupGame<Block> {
 
 impl EndState for CoupGame<End> {
     fn summary(self) -> Summary {
-        assert_eq!(self.data.players.alive().len(), 1);
-        let last_player = self
-            .data
-            .players
-            .alive()
-            .keys()
-            .copied()
-            .next()
-            .expect("Last man standing");
-
         Summary {
-            winner: last_player,
+            winner: self.state.winner,
         }
     }
 }

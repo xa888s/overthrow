@@ -7,5 +7,5 @@ pub mod deck;
 mod game;
 pub use game::match_to_indices;
 pub mod machine;
-mod player_map;
+pub mod player_map;
 pub mod players;

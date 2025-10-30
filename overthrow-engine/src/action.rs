@@ -144,7 +144,7 @@ pub enum Blocks {
 }
 
 impl Blocks {
-    pub fn blocker_id(&self) -> PlayerId {
+    pub fn blocker(&self) -> PlayerId {
         let (Blocks::Other(block) | Blocks::Steal(block, _)) = self;
         block.blocker
     }
@@ -245,7 +245,7 @@ impl Block {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct PossibleActions {
-    pub(crate) current_player: PlayerId,
+    pub(crate) actor: PlayerId,
     pub(crate) assassinations: Vec<Action>,
     pub(crate) coups: Vec<Action>,
     pub(crate) steal: Vec<Action>,
@@ -299,9 +299,14 @@ impl Challenge {
 pub struct PossibleReactions {
     pub(crate) block: Blocks,
     pub(crate) challenge: HashMap<PlayerId, Challenge>,
+    pub(crate) actor: PlayerId,
 }
 
 impl PossibleReactions {
+    pub fn actor(&self) -> PlayerId {
+        self.actor
+    }
+
     pub fn block(&self) -> &Blocks {
         &self.block
     }
@@ -339,9 +344,14 @@ impl PossibleReactions {
 #[derive(Debug)]
 pub struct PossibleBlocks {
     pub(crate) blocks: HashMap<PlayerId, Block>,
+    pub(crate) actor: PlayerId,
 }
 
 impl PossibleBlocks {
+    pub fn actor(&self) -> PlayerId {
+        self.actor
+    }
+
     pub fn all(&self) -> &HashMap<PlayerId, Block> {
         &self.blocks
     }
@@ -350,10 +360,15 @@ impl PossibleBlocks {
 #[derive(Debug)]
 pub struct PossibleChallenges {
     pub(crate) challenges: HashMap<PlayerId, Challenge>,
+    pub(crate) actor: PlayerId,
 }
 
 impl PossibleChallenges {
     pub fn all(&self) -> &HashMap<PlayerId, Challenge> {
         &self.challenges
+    }
+
+    pub fn actor(&self) -> PlayerId {
+        self.actor
     }
 }

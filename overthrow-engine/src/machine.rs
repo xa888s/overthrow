@@ -1,5 +1,6 @@
 use crate::action::BlockableAct;
 use crate::action::ChallengeableAct;
+use crate::player_map::PlayerMap;
 
 use super::action;
 use super::action::Action;
@@ -10,7 +11,7 @@ use super::coins::Deposit;
 use super::coins::Withdrawal;
 use super::deck::Hand;
 use super::deck::{Card, Deck};
-use super::players::{PlayerId, Players, RawPlayers};
+use super::players::PlayerId;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
@@ -18,7 +19,7 @@ use typestate::typestate;
 
 #[derive(Debug)]
 pub struct GameInfo<'state> {
-    pub players: &'state Players,
+    pub players: &'state PlayerMap,
     pub current_player: PlayerId,
     pub coins_remaining: u8,
     pub deck: &'state [Card],
@@ -40,7 +41,7 @@ pub enum Outcome {
 
 #[derive(Debug)]
 pub(crate) struct CoupData {
-    pub(crate) players: Players,
+    pub(crate) players: PlayerMap,
     pub(crate) coins: CoinPile,
     pub(crate) deck: Deck,
 }
@@ -156,7 +157,9 @@ pub(crate) mod game {
         pub(crate) blocker: PlayerId,
         pub(crate) kind: BlockableAct,
     }
-    #[state] pub struct End;
+    #[state] pub struct End {
+        pub(crate) winner: PlayerId,
+    }
 
     pub enum GameState {
         Wait,
@@ -175,7 +178,11 @@ pub(crate) mod game {
 
     pub trait Wait {
         fn with_count(count: usize) -> Wait;
-        fn with_players(players: RawPlayers) -> Wait;
+        fn with_player_names<T>(players: T) -> Wait
+        where 
+            T: IntoIterator,
+            T::Item: AsRef<str>,
+        ;
         fn info(&self) -> GameInfo<'_>;
         fn actions(&self) -> &PossibleActions;
         fn play(self, action: Action) -> ActionKind;
@@ -262,13 +269,14 @@ impl<S: CoupGameState> CoupGame<S> {
     pub(crate) fn kill(mut self, victim: PlayerId) -> GameState {
         let coins = &mut self.data.coins;
         let players = &mut self.data.players;
-        let player_coins = players.kill(victim).expect("Player should be killable");
+        let player_coins = players.kill(victim);
         coins.return_coins(player_coins);
 
-        if players.is_game_over() {
+        // checking if game is over
+        if let Some(id) = players.game_over() {
             GameState::End(CoupGame {
                 data: self.data,
-                state: End,
+                state: End { winner: id },
             })
         } else {
             GameState::Wait(self.end_turn())
@@ -285,7 +293,7 @@ impl<S: CoupGameState> CoupGame<S> {
                     choices: [c1, c2],
                 },
             }),
-            Hand::Last(_, _) => self.kill(victim),
+            Hand::Last { .. } => self.kill(victim),
         }
     }
 
@@ -363,8 +371,7 @@ mod tests {
 
     #[test]
     fn basic_game_info() {
-        let players = RawPlayers::with_names(["Dave", "Garry"]).expect("Valid length");
-        let game = CoupGame::with_players(players);
+        let game = CoupGame::with_player_names(["Dave", "Garry"].to_vec());
 
         let GameInfo {
             players,
@@ -375,7 +382,7 @@ mod tests {
 
         assert_eq!(coins_remaining, 46);
         assert_eq!(current_player, PlayerId::One);
-        assert_eq!(players.alive().len(), 2);
+        assert_eq!(players.alive().count(), 2);
         assert_eq!(deck.len(), 11);
     }
 }

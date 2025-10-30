@@ -1,99 +1,176 @@
 use crate::{
     Disconnected,
-    dispatcher::Senders,
-    game::{BroadcastMessage, Choices, GameMessage, PlayerGameInfo},
+    dispatcher::ClientChannels,
+    game::{BroadcastMessage, Choices, GameMessage, Pass, PlayerGameInfo},
 };
 
 use super::AppState;
-use axum::Error;
+use axum::Error as AxumError;
 use axum::extract::ws::{Message, Utf8Bytes, WebSocket};
 use futures::{
     SinkExt, StreamExt,
     stream::{SplitSink, SplitStream},
 };
+use jiff::Timestamp;
 use overthrow_engine::{
     action::{Blocks, Reaction},
     deck::Card,
-    machine::Summary,
     match_to_indices,
 };
+use thiserror::Error;
 
 use overthrow_types::*;
 
 use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
-use std::ops::ControlFlow;
-use tokio::select;
-use tokio::sync::{broadcast, oneshot};
-use tracing::instrument;
+use std::sync::Arc;
+use std::{net::SocketAddr, time::Duration};
+use tokio::{select, time::timeout_at};
+use tokio::{sync::oneshot, time::Instant};
+use tracing::{debug, instrument, trace};
 use uuid::Uuid;
 
 fn serialize<T: Serialize>(value: T) -> Utf8Bytes {
     serde_json::to_string(&value).unwrap().into()
 }
 
-fn deserialize<T: for<'a> Deserialize<'a>>(response: Utf8Bytes) -> Result<T, ClientError> {
+fn deserialize<T: for<'a> Deserialize<'a>>(response: &Utf8Bytes) -> Result<T, ClientError> {
     serde_json::from_str::<T>(response.as_str()).map_err(|_| ClientError::InvalidResponse)
 }
 
-#[derive(Debug)]
-enum Ending {
-    Summary(Summary),
+#[derive(Debug, Error)]
+enum Error {
+    #[error(transparent)]
+    Client(#[from] ClientError),
+    #[error("Game was cancelled")]
     GameCancelled,
+    #[error("Client disconnected")]
+    Disconnected,
+}
+
+// TODO: properly handle axum errors, for now we treat it as a disconnection
+impl From<AxumError> for Error {
+    fn from(_: AxumError) -> Self {
+        Error::Disconnected
+    }
 }
 
 #[derive(Debug)]
 struct ClientHandle<'state> {
     player_sender: &'state mut SplitSink<WebSocket, Message>,
     player_receiver: &'state mut SplitStream<WebSocket>,
-    broadcast_receiver: &'state mut broadcast::Receiver<BroadcastMessage>,
-    senders: &'state mut Senders,
+    senders: Arc<ClientChannels>,
 }
 
 impl<'state> ClientHandle<'state> {
-    async fn send_to_client(&mut self, message: ClientMessage) -> Result<(), Error> {
+    async fn send_to_client(&mut self, message: ClientMessage) -> Result<(), AxumError> {
         let message = Message::Text(serialize(message));
         self.player_sender.send(message).await
     }
 
-    async fn send_game_cancelled(&mut self) -> Result<(), Error> {
+    async fn send_game_cancelled(&mut self) -> Result<(), AxumError> {
         self.send_to_client(ClientMessage::GameCancelled).await
     }
 
-    async fn send_not_ready(&mut self) -> Result<(), Error> {
+    async fn send_not_ready(&mut self) -> Result<(), AxumError> {
         let not_ready = Message::Text(serialize(ClientError::NotReady));
         self.player_sender.send(not_ready).await
     }
 
-    async fn send_invalid_response(&mut self) -> Result<(), Error> {
+    async fn send_invalid_response(&mut self) -> Result<(), AxumError> {
         let err = Message::Text(serialize(ClientError::InvalidResponse));
         self.player_sender.send(err).await
     }
 
-    #[instrument(skip_all)]
-    async fn handle_broadcast(
+    // tries to parse message and have response_handler process it. If the message provided by the client is invalid in some way,
+    // the function will send the client an invalid response message and try again until it suceeds, the timeout completes
+    // or the client disconnects
+    async fn handle_timed_client_response<M, H>(
         &mut self,
-        message: BroadcastMessage,
-    ) -> Result<ControlFlow<Ending>, Error> {
-        match message {
-            BroadcastMessage::End(summary) => {
-                self.send_to_client(ClientMessage::End(summary)).await?;
-                Ok(ControlFlow::Break(Ending::Summary(summary)))
+        message_builder: M,
+        mut response_handler: H,
+    ) -> Result<(), Error>
+    where
+        M: FnOnce(Timestamp) -> ClientMessage,
+        // unfortunately Arc is required because of a bug with AsyncFn(Mut) bounds
+        H: AsyncFnMut(Arc<ClientChannels>, ClientResponse) -> Result<(), ClientError>,
+    {
+        // get our initial countdown time
+        let (countdown_end, deadline) = get_countdown_time();
+        trace!(countdown_end=%countdown_end, "Set countdown timeout");
+
+        // send out initial message
+        self.send_to_client(message_builder(countdown_end)).await?;
+
+        loop {
+            let result = match timeout_at(deadline, self.player_receiver.next()).await {
+                Ok(message) => {
+                    // if the client disconnects, the message is not a valid websocket message, it is not text,
+                    // and/or it doesn't deserialize correctly, the response is invalid and we return Err
+                    // Otherwise, we pass the response to the handler and see if it returns Ok
+                    use ClientError as E;
+                    let Ok(response) = message
+                        .ok_or(Error::Disconnected)?
+                        .and_then(|msg| msg.into_text())
+                        .map_err(|_| E::InvalidResponse)
+                        .and_then(|text| deserialize(&text))
+                    else {
+                        self.send_invalid_response().await?;
+                        continue;
+                    };
+
+                    response_handler(Arc::clone(&self.senders), response).await
+                }
+                // timeout reached, send pass
+                Err(_) => {
+                    self.senders.pass.send(Pass).await.unwrap();
+                    Ok(())
+                }
+            };
+
+            // we only loop if the message is invalid
+            if result.is_ok() {
+                break Ok(());
             }
-            BroadcastMessage::Info(info) => {
-                self.send_to_client(ClientMessage::Info(info)).await?;
-                Ok(ControlFlow::Continue(()))
-            }
-            BroadcastMessage::Outcome(outcome) => {
-                self.send_to_client(ClientMessage::Outcome(outcome)).await?;
-                Ok(ControlFlow::Continue(()))
-            }
-            BroadcastMessage::GameCancelled => {
-                self.send_to_client(ClientMessage::GameCancelled).await?;
-                Ok(ControlFlow::Break(Ending::GameCancelled))
-            }
-            BroadcastMessage::ReactionTimeout => {
-                panic!("Should never have a top level reaction timeout")
+        }
+    }
+
+    // tries to parse message and have handler process it. If the message provided by the client is invalid in some way,
+    // the function will send the client an invalid response message and try again until it suceeds or the client disconnects
+    async fn handle_client_response<H>(
+        &mut self,
+        message: ClientMessage,
+        mut response_handler: H,
+    ) -> Result<(), Error>
+    where
+        // unfortunately Arc is required because of a bug with AsyncFn(Mut) bounds
+        H: AsyncFnMut(Arc<ClientChannels>, ClientResponse) -> Result<(), ClientError>,
+    {
+        // send out initial message
+        self.send_to_client(message).await?;
+
+        loop {
+            let message = self.player_receiver.next().await;
+
+            // if the client disconnects, the message is not a valid websocket message, it is not text,
+            // and/or it doesn't deserialize correctly, the response is invalid and we return
+            // Otherwise, we pass the response to the handler and see if it returns
+            use ClientError as E;
+
+            let Ok(response) = message
+                .ok_or(Error::Disconnected)?
+                .and_then(|msg| msg.into_text())
+                .map_err(|_| E::InvalidResponse)
+                .and_then(|text| deserialize::<ClientResponse>(&text))
+            else {
+                self.send_invalid_response().await?;
+                continue;
+            };
+
+            let result = response_handler(Arc::clone(&self.senders), response).await;
+
+            // we only loop if the message is invalid
+            if result.is_ok() {
+                break Ok(());
             }
         }
     }
@@ -108,66 +185,60 @@ impl<'state> ClientHandle<'state> {
     }
 
     async fn handle_choose_two(&mut self, choices: [Card; 4]) -> Result<(), Error> {
-        self.send_to_client(ClientMessage::TwoFromFourChoices(choices))
-            .await?;
+        let message = ClientMessage::TwoFromFourChoices(choices);
 
         // matching found == chosen cards are valid
-        let are_valid_choices = |cards| match_to_indices(cards, choices).is_some();
+        let are_valid_choices = move |cards| match_to_indices(cards, choices).is_some();
 
-        // wait for client's choice
-        loop {
-            if let Some(Ok(Message::Text(message))) = self.player_receiver.next().await
-                && let Ok(response) = deserialize(message)
-                && let ClientResponse::ExchangeTwo(cards) = response
+        let response_handler = async move |senders: Arc<ClientChannels>, msg| {
+            if let ClientResponse::ExchangeTwo(cards) = msg
                 && are_valid_choices(cards)
             {
-                self.senders.choose_two.send(cards).await.unwrap();
-                break Ok(());
+                senders.choose_two.send(cards).await.unwrap();
+                Ok(())
             } else {
-                self.send_invalid_response().await?;
+                Err(ClientError::InvalidResponse)
             }
-        }
+        };
+
+        self.handle_client_response(message, response_handler).await
     }
 
     async fn handle_choose_one(&mut self, choices: [Card; 3]) -> Result<(), Error> {
-        self.send_to_client(ClientMessage::OneFromThreeChoices(choices))
-            .await?;
+        let message = ClientMessage::OneFromThreeChoices(choices);
 
-        // wait for client's choice
-        loop {
-            if let Some(Ok(Message::Text(message))) = self.player_receiver.next().await
-                && let Ok(response) = deserialize(message)
-                && let ClientResponse::ExchangeOne(card) = response
+        let response_handler = async move |senders: Arc<ClientChannels>, msg| {
+            if let ClientResponse::ExchangeOne(card) = msg
                 && choices.contains(&card)
             {
-                self.senders.choose_one.send(card).await.unwrap();
-                break Ok(());
+                senders.choose_one.send(card).await.unwrap();
+                Ok(())
             } else {
-                self.send_invalid_response().await?;
+                Err(ClientError::InvalidResponse)
             }
-        }
+        };
+
+        self.handle_client_response(message, response_handler).await
     }
 
     async fn handle_choosing_victim(&mut self, choices: [Card; 2]) -> Result<(), Error> {
-        self.send_to_client(ClientMessage::VictimChoices(choices))
-            .await?;
+        let message = ClientMessage::VictimChoices(choices);
 
-        // wait for client's choice
-        loop {
-            if let Some(Ok(Message::Text(message))) = self.player_receiver.next().await
-                && let Ok(response) = deserialize(message)
-                && let ClientResponse::ChooseVictim(card) = response
+        let response_handler = async move |senders: Arc<ClientChannels>, msg| {
+            if let ClientResponse::ChooseVictim(card) = msg
                 && choices.contains(&card)
             {
-                self.senders.victim_card.send(card).await.unwrap();
-                break Ok(());
+                senders.victim_card.send(card).await.unwrap();
+                Ok(())
             } else {
-                self.send_invalid_response().await?;
+                Err(ClientError::InvalidResponse)
             }
-        }
+        };
+
+        self.handle_client_response(message, response_handler).await
     }
 
-    #[instrument(skip(choices))]
+    #[instrument(skip(self, choices))]
     async fn handle_action_choices(&mut self, choices: Choices) -> Result<(), Error> {
         match choices {
             Choices::Actions(actions) => self.handle_actions(actions).await,
@@ -178,105 +249,89 @@ impl<'state> ClientHandle<'state> {
     }
 
     async fn handle_actions(&mut self, actions: Vec<Action>) -> Result<(), Error> {
-        self.send_to_client(ClientMessage::ActionChoices(actions.clone()))
-            .await?;
+        let message = ClientMessage::ActionChoices(actions.clone());
 
-        loop {
-            if let Some(Ok(Message::Text(message))) = self.player_receiver.next().await
-                && let Ok(response) = deserialize(message)
-                && let ClientResponse::Act(action) = response
+        let response_handler = async move |senders: Arc<ClientChannels>, msg| {
+            if let ClientResponse::Act(action) = msg
                 && actions.contains(&action)
             {
-                self.senders.action.send(action).await.unwrap();
-                break Ok(());
+                senders.action.send(action).await.unwrap();
+                Ok(())
             } else {
-                self.send_invalid_response().await?;
+                Err(ClientError::InvalidResponse)
             }
-        }
+        };
+
+        self.handle_client_response(message, response_handler).await
     }
 
     async fn handle_blocks(&mut self, blocks: Blocks) -> Result<(), Error> {
-        self.send_to_client(ClientMessage::BlockChoices(blocks.clone()))
-            .await?;
+        // FIXME: used to resolve higher-kinded lifetime errors
+        let message_blocks = blocks.clone();
+        let message_builder =
+            move |timestamp| ClientMessage::BlockChoices(message_blocks, timestamp);
 
-        loop {
-            select! {
-                Ok(BroadcastMessage::ReactionTimeout) = self.broadcast_receiver.recv() => break Ok(()),
-                Some(Ok(Message::Text(msg))) = self.player_receiver.next() => {
-                    // if parsing fails, send invalid response
-                    let Ok(msg) = deserialize(msg) else { self.send_invalid_response().await?; continue };
-
-                    // if pass do nothing, if block and valid block, send to game task, otherwise invalid response
-                    match msg {
-                        ClientResponse::Pass => break Ok(()),
-                        ClientResponse::Block(block_as) if blocks.claims(block_as) => {
-                            self.handle_block(blocks, block_as).await;
-                            break Ok(());
-                        }
-                        _ => self.send_invalid_response().await?,
-                    }
+        let response_handler = async move |senders: Arc<ClientChannels>, msg| {
+            match msg {
+                ClientResponse::Pass => senders.pass.send(Pass).await.unwrap(),
+                ClientResponse::Block(block_as) if blocks.claims(block_as) => {
+                    ClientHandle::handle_block(senders, blocks.clone(), block_as).await
                 }
+                _ => return Err(ClientError::InvalidResponse),
             }
-        }
+            Ok(())
+        };
+
+        self.handle_timed_client_response(message_builder, response_handler)
+            .await
     }
 
     async fn handle_challenge(&mut self, challenge: Challenge) -> Result<(), Error> {
-        self.send_to_client(ClientMessage::ChallengeChoice(challenge.clone()))
-            .await?;
+        // FIXME: used to resolve higher-kinded lifetime errors
+        let builder_challenge = challenge.clone();
+        let builder =
+            move |countdown_end| ClientMessage::ChallengeChoice(builder_challenge, countdown_end);
 
-        loop {
-            select! {
-                Ok(BroadcastMessage::ReactionTimeout) = self.broadcast_receiver.recv() => break Ok(()),
-                Some(Ok(Message::Text(msg))) = self.player_receiver.next() => {
-                    // if parsing fails, send invalid response
-                    let Ok(msg) = deserialize::<ClientResponse>(msg) else { self.send_invalid_response().await?; continue };
-
-                    // if pass do nothing, if challenge and valid challenge, send to game task, otherwise invalid response
-                    match msg {
-                        ClientResponse::Pass => break Ok(()),
-                        ClientResponse::Challenge => {
-                            self.senders.challenge.send(challenge).await.unwrap();
-                            break Ok(());
-                        },
-                        _ => self.send_invalid_response().await?,
-                    }
+        let response_handler = async move |senders: Arc<ClientChannels>, msg| {
+            match msg {
+                ClientResponse::Pass => senders.pass.send(Pass).await.unwrap(),
+                ClientResponse::Challenge => {
+                    senders.challenge.send(challenge.clone()).await.unwrap()
                 }
+                _ => return Err(ClientError::InvalidResponse),
             }
-        }
+            Ok(())
+        };
+
+        self.handle_timed_client_response(builder, response_handler)
+            .await
     }
 
     async fn handle_reactions(&mut self, reactions: Vec<Reaction>) -> Result<(), Error> {
-        self.send_to_client(ClientMessage::ReactionChoices(reactions.clone()))
-            .await?;
+        // FIXME: used to resolve higher-kinded lifetime errors
+        let builder_reactions = reactions.clone();
+        let message_builder =
+            move |timestamp| ClientMessage::ReactionChoices(builder_reactions, timestamp);
 
-        loop {
-            select! {
-                Ok(BroadcastMessage::ReactionTimeout) = self.broadcast_receiver.recv() => break Ok(()),
-                Some(Ok(Message::Text(msg))) = self.player_receiver.next() => {
-                    // if parsing fails, send invalid response
-                    let Ok(msg) = deserialize::<ClientResponse>(msg) else { self.send_invalid_response().await?; continue };
-
-                    // if pass do nothing, if react and valid reaction, send to game task, otherwise invalid response
-                    match msg {
-                        ClientResponse::Pass => break Ok(()),
-                        ClientResponse::React(react) if reactions.contains(&react) => {
-                            match react {
-                                Reaction::Block(block) => self.senders.block.send(block).await.unwrap(),
-                                Reaction::Challenge(challenge) => {
-                                    self.senders.challenge.send(challenge).await.unwrap()
-                                }
-                            }
-
-                            break Ok(());
-                        }
-                        _ => self.send_invalid_response().await?,
+        let response_handler = async move |senders: Arc<ClientChannels>, msg| {
+            match msg {
+                ClientResponse::Pass => senders.pass.send(Pass).await.unwrap(),
+                ClientResponse::React(react) if reactions.contains(&react) => match react {
+                    Reaction::Block(block) => senders.block.send(block).await.unwrap(),
+                    Reaction::Challenge(challenge) => {
+                        senders.challenge.send(challenge).await.unwrap()
                     }
-                }
+                },
+                _ => return Err(ClientError::InvalidResponse),
             }
-        }
+            Ok(())
+        };
+
+        self.handle_timed_client_response(message_builder, response_handler)
+            .await
     }
 
-    async fn handle_block(&mut self, blocks: Blocks, block_as: Card) {
+    async fn handle_block(senders: Arc<ClientChannels>, blocks: Blocks, block_as: Card) {
         let block = match blocks {
             Blocks::Other(block) => block,
             Blocks::Steal(b1, b2) => {
@@ -287,7 +342,7 @@ impl<'state> ClientHandle<'state> {
                 }
             }
         };
-        self.senders.block.send(block).await.unwrap();
+        senders.block.send(block).await.unwrap();
     }
 }
 
@@ -311,7 +366,7 @@ pub async fn client_handler(addr: SocketAddr, stream: WebSocket, state: AppState
     tracing::Span::current().record("game_id", game_id.to_string());
 
     if client_handler_inner(
-        (addr, game_id),
+        game_id,
         dispatch_receiver,
         &mut client_sender,
         &mut client_receiver,
@@ -336,7 +391,7 @@ pub async fn client_handler(addr: SocketAddr, stream: WebSocket, state: AppState
 }
 
 async fn client_handler_inner(
-    (_, game_id): (SocketAddr, Uuid),
+    game_id: Uuid,
     mut dispatch_receiver: oneshot::Receiver<PlayerGameInfo>,
     client_sender: &mut SplitSink<WebSocket, Message>,
     client_receiver: &mut SplitStream<WebSocket>,
@@ -350,7 +405,8 @@ async fn client_handler_inner(
     let PlayerGameInfo {
         id,
         mut broadcast_receiver,
-        channels: (mut tx, mut rx),
+        mut info,
+        channels: (tx, mut rx),
     } = loop {
         select! {
             Ok(game_channel) = &mut dispatch_receiver => {
@@ -365,7 +421,7 @@ async fn client_handler_inner(
                 }
             }
             else => {
-                return Err(Error::new("Client has left game"));
+                return Err(Error::Disconnected);
             }
         }
     };
@@ -379,8 +435,7 @@ async fn client_handler_inner(
     let mut client = ClientHandle {
         player_receiver: client_receiver,
         player_sender: client_sender,
-        broadcast_receiver: &mut broadcast_receiver.resubscribe(),
-        senders: &mut tx,
+        senders: Arc::new(tx),
     };
 
     // check for messages from the game itself, as there is nothing the player can do (yet)
@@ -389,32 +444,45 @@ async fn client_handler_inner(
             // TODO: find way to encapsulate player_receiver
             Some(Ok(message)) = client.player_receiver.next() => {
                 if matches!(message, Message::Close(_)) {
-                    break Err(Error::new("Client disconnected"));
+                    break Err(Error::Disconnected);
                 }
-                let Message::Text(message) = message else { todo!() };
-                tracing::debug!(player_id = ?id, "Received premature message from client: {message}");
+
+                debug!(player_id = ?id, "Received premature message from client: {message:?}");
                 client.send_not_ready().await?;
             },
+            // send client their views when we receive them
+            Some(info) = info.recv() => client.send_to_client(ClientMessage::Info(info)).await?,
             Some(message) = rx.recv() => {
                 select! {
                     res = client.handle_game_message(message) => res?,
                     Ok(BroadcastMessage::GameCancelled) = broadcast_receiver.recv() => {
                         client.send_game_cancelled().await?;
-                        break Err(Error::new("Game was cancelled"));
+                        break Err(Error::GameCancelled);
                     },
                 }
             },
             Ok(broadcast) = broadcast_receiver.recv() => {
-                match client.handle_broadcast(broadcast).await? {
-                    ControlFlow::Break(Ending::Summary(summary)) => {
-                        break Ok(());
-                    },
-                    ControlFlow::Break(Ending::GameCancelled) => {
-                        break Err(Error::new("Game was cancelled"));
-                    },
-                    _ => continue,
+                match broadcast {
+                    BroadcastMessage::End(summary) => {
+                        client.send_to_client(ClientMessage::End(summary)).await?;
+                        todo!()
+                    }
+                    BroadcastMessage::Outcome(outcome) => client.send_to_client(ClientMessage::Outcome(outcome)).await?,
+                    BroadcastMessage::GameCancelled => {
+                        client.send_to_client(ClientMessage::GameCancelled).await?;
+                        break Err(Error::GameCancelled);
+                    }
                 }
             },
         }
     }
+}
+
+fn get_countdown_time() -> (Timestamp, Instant) {
+    // getting countdown timestamp
+    let duration = Duration::from_secs(10);
+    let countdown_end = Timestamp::now() + duration;
+    let instant = Instant::now() + duration;
+
+    (countdown_end, instant)
 }
